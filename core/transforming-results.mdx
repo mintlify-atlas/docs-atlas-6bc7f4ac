@@ -1,0 +1,507 @@
+---
+title: Transforming Results
+description: Transform success and error values with map, mapError, andThen, and tap methods
+---
+
+## Overview
+
+Result provides several methods for transforming values:
+- `map()` - Transform success values
+- `mapError()` - Transform error values
+- `andThen()` - Chain operations that return Results
+- `tap()` - Run side effects without changing the Result
+
+All methods support both **data-first** (method-style) and **data-last** (pipeable) APIs.
+
+## Transforming Success Values
+
+### Result.map()
+
+Transforms the success value while preserving errors.
+
+```typescript
+const double = (x: number) => x * 2;
+
+Result.ok(21).map(double); // Ok(42)
+Result.err("fail").map(double); // Err("fail") - unchanged
+```
+
+#### Type Signature
+
+```typescript
+// Method style (data-first)
+class Ok<A, E> {
+  map<B>(fn: (a: A) => B): Ok<B, E>;
+}
+
+class Err<T, E> {
+  map<U>(fn: (a: never) => U): Err<U, E>;
+}
+
+// Function style (dual API)
+function map<A, B, E>(
+  result: Result<A, E>, 
+  fn: (a: A) => B
+): Result<B, E>;
+
+function map<A, B>(
+  fn: (a: A) => B
+): <E>(result: Result<A, E>) => Result<B, E>;
+```
+
+#### Data-First (Method Style)
+
+```typescript
+const getUserName = (id: string): Result<string, NotFoundError> => {
+  return fetchUser(id)
+    .map(user => user.name)
+    .map(name => name.toUpperCase());
+};
+```
+
+#### Data-Last (Pipeable Style)
+
+```typescript
+import { pipe } from "better-result";
+
+const getUserName = (id: string): Result<string, NotFoundError> => {
+  return pipe(
+    fetchUser(id),
+    Result.map(user => user.name),
+    Result.map(name => name.toUpperCase())
+  );
+};
+```
+
+<Info>
+The pipeable API is useful for building reusable transformation pipelines without nesting.
+</Info>
+
+### Error Handling in map()
+
+If the transformation function throws, `map()` will throw a `Panic`:
+
+```typescript
+try {
+  Result.ok(1).map(() => {
+    throw new Error("map callback failed");
+  });
+} catch (e) {
+  console.log(e instanceof Panic); // true
+  console.log(e.cause); // Error("map callback failed")
+}
+```
+
+<Warning>
+Never throw inside `map()`. If your transformation can fail, use `andThen()` instead and return a Result.
+</Warning>
+
+## Transforming Error Values
+
+### Result.mapError()
+
+Transforms the error value while preserving success.
+
+```typescript
+const toUpperCase = (s: string) => s.toUpperCase();
+
+Result.err("fail").mapError(toUpperCase); // Err("FAIL")
+Result.ok(42).mapError(toUpperCase); // Ok(42) - unchanged
+```
+
+#### Normalizing Error Types
+
+Use `mapError()` to convert error unions to a single error type:
+
+```typescript
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+}>() {}
+
+class NetworkError extends TaggedError("NetworkError")<{
+  message: string;
+}>() {}
+
+class AppError extends TaggedError("AppError")<{
+  message: string;
+  originalTag: string;
+}>() {}
+
+type DomainError = ParseError | NetworkError;
+
+const normalize = (
+  result: Result<Data, DomainError>
+): Result<Data, AppError> => {
+  return result.mapError(e => new AppError({
+    message: e.message,
+    originalTag: e._tag,
+  }));
+};
+```
+
+#### Type Signature
+
+```typescript
+// Method style
+class Ok<A, E> {
+  mapError<E2>(fn: (e: never) => E2): Ok<A, E2>;
+}
+
+class Err<T, E> {
+  mapError<E2>(fn: (e: E) => E2): Err<T, E2>;
+}
+
+// Function style (dual API)
+function mapError<A, E, E2>(
+  result: Result<A, E>,
+  fn: (e: E) => E2
+): Result<A, E2>;
+
+function mapError<E, E2>(
+  fn: (e: E) => E2
+): <A>(result: Result<A, E>) => Result<A, E2>;
+```
+
+## Chaining Operations
+
+### Result.andThen()
+
+Chains a function that returns a Result, enabling sequential composition where each step can fail.
+
+```typescript
+const divide = (a: number, b: number): Result<number, string> => {
+  if (b === 0) return Result.err("Division by zero");
+  return Result.ok(a / b);
+};
+
+const sqrt = (x: number): Result<number, string> => {
+  if (x < 0) return Result.err("Negative number");
+  return Result.ok(Math.sqrt(x));
+};
+
+const result = divide(16, 4)
+  .andThen(x => sqrt(x)); // Ok(2)
+
+const failed = divide(16, 0)
+  .andThen(x => sqrt(x)); // Err("Division by zero") - sqrt never called
+```
+
+#### map vs andThen
+
+<Tabs>
+  <Tab title="Use map">
+    When the transformation **cannot fail**:
+    
+    ```typescript
+    Result.ok(user)
+      .map(u => u.name)           // string extraction
+      .map(name => name.trim())   // string manipulation
+      .map(name => ({ name }));   // object creation
+    ```
+  </Tab>
+  
+  <Tab title="Use andThen">
+    When the transformation **can fail** and returns a Result:
+    
+    ```typescript
+    Result.ok(userId)
+      .andThen(id => fetchUser(id))      // may fail: NotFoundError
+      .andThen(user => validateUser(user)) // may fail: ValidationError
+      .andThen(user => saveUser(user));    // may fail: DatabaseError
+    ```
+  </Tab>
+</Tabs>
+
+#### Error Type Union
+
+`andThen()` automatically unions error types from all steps:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+const fetchUser = (id: string): Result<User, NotFoundError> => {
+  // ...
+};
+
+const validateUser = (user: User): Result<User, ValidationError> => {
+  // ...
+};
+
+const result = fetchUser("123")
+  .andThen(user => validateUser(user));
+// Result<User, NotFoundError | ValidationError>
+```
+
+#### Type Signature
+
+```typescript
+// Method style
+class Ok<A, E> {
+  andThen<B, E2>(fn: (a: A) => Result<B, E2>): Result<B, E | E2>;
+}
+
+class Err<T, E> {
+  andThen<U, E2>(fn: (a: never) => Result<U, E2>): Err<U, E | E2>;
+}
+
+// Function style (dual API)
+function andThen<A, B, E, E2>(
+  result: Result<A, E>,
+  fn: (a: A) => Result<B, E2>
+): Result<B, E | E2>;
+
+function andThen<A, B, E2>(
+  fn: (a: A) => Result<B, E2>
+): <E>(result: Result<A, E>) => Result<B, E | E2>;
+```
+
+### Result.andThenAsync()
+
+Async version of `andThen()` for chaining async operations:
+
+```typescript
+const result = await Result.ok(userId)
+  .andThenAsync(async id => {
+    const user = await fetchUserFromDB(id);
+    return Result.ok(user);
+  });
+```
+
+#### Type Signature
+
+```typescript
+class Ok<A, E> {
+  andThenAsync<B, E2>(
+    fn: (a: A) => Promise<Result<B, E2>>
+  ): Promise<Result<B, E | E2>>;
+}
+
+class Err<T, E> {
+  andThenAsync<U, E2>(
+    fn: (a: never) => Promise<Result<U, E2>>
+  ): Promise<Err<U, E | E2>>;
+}
+```
+
+## Side Effects
+
+### Result.tap()
+
+Runs a side effect on success values without changing the Result. Useful for logging, metrics, or debugging.
+
+```typescript
+const result = Result.ok(42)
+  .tap(x => console.log("Got value:", x)) // logs: Got value: 42
+  .map(x => x * 2);
+// Ok(84)
+
+const failed = Result.err("oops")
+  .tap(x => console.log("Got value:", x)) // not called
+  .map(x => x * 2);
+// Err("oops")
+```
+
+#### Practical Example
+
+```typescript
+const createUser = (data: UserInput): Result<User, ValidationError> => {
+  return validateInput(data)
+    .tap(valid => logger.info("Validation passed", { valid }))
+    .andThen(valid => saveToDatabase(valid))
+    .tap(user => metrics.increment("user.created"))
+    .tap(user => sendWelcomeEmail(user.email));
+};
+```
+
+<Warning>
+If the tap callback throws, it will throw a `Panic`. Keep side effects simple and don't throw.
+</Warning>
+
+### Result.tapAsync()
+
+Async version of `tap()` for async side effects:
+
+```typescript
+const result = await Result.ok(user)
+  .tapAsync(async u => {
+    await auditLog.write("User accessed", { userId: u.id });
+  })
+  .tapAsync(async u => {
+    await metrics.track("user.view", { id: u.id });
+  });
+```
+
+#### Type Signature
+
+```typescript
+class Ok<A, E> {
+  tap(fn: (a: A) => void): Ok<A, E>;
+  tapAsync(fn: (a: A) => Promise<void>): Promise<Ok<A, E>>;
+}
+
+class Err<T, E> {
+  tap(fn: (a: never) => void): Err<T, E>;
+  tapAsync(fn: (a: never) => Promise<void>): Promise<Err<T, E>>;
+}
+```
+
+## Extracting Values
+
+### Result.unwrap()
+
+Extracts the success value or throws a `Panic` if the Result is an error.
+
+```typescript
+const value = Result.ok(42).unwrap(); // 42
+
+try {
+  Result.err("failed").unwrap();
+} catch (e) {
+  console.log(e instanceof Panic); // true
+}
+```
+
+<Warning>
+Only use `unwrap()` when you're certain the Result is Ok (e.g., after type narrowing with `isOk()`), or when a panic is acceptable.
+</Warning>
+
+### Result.unwrapOr()
+
+Extracts the success value or returns a fallback if the Result is an error.
+
+```typescript
+const value = Result.ok(42).unwrapOr(0); // 42
+const fallback = Result.err("fail").unwrapOr(0); // 0
+```
+
+#### Type Widening
+
+The return type is the union of success type and fallback type:
+
+```typescript
+const result: Result<number, Error> = fetchNumber();
+const value: number | string = result.unwrapOr("default");
+```
+
+## Real-World Example
+
+Here's a complete example combining multiple transformations:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+class DatabaseError extends TaggedError("DatabaseError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+type UserError = NotFoundError | ValidationError | DatabaseError;
+
+const updateUserEmail = async (
+  userId: string,
+  newEmail: string
+): Promise<Result<User, UserError>> => {
+  return Result.tryPromise({
+    try: async () => {
+      // Fetch user from database
+      const user = await fetchUser(userId);
+      if (!user) {
+        return Result.err(new NotFoundError({
+          id: userId,
+          message: `User ${userId} not found`,
+        }));
+      }
+
+      // Validate new email
+      if (!isValidEmail(newEmail)) {
+        return Result.err(new ValidationError({
+          field: "email",
+          message: "Invalid email format",
+        }));
+      }
+
+      // Update user
+      user.email = newEmail;
+      await saveUser(user);
+      return Result.ok(user);
+    },
+    catch: (cause) => new DatabaseError({
+      message: "Database operation failed",
+      cause,
+    }),
+  })
+    .then(result => result
+      .andThen(r => r) // flatten nested Result
+      .tap(user => logger.info("Email updated", { userId: user.id }))
+      .tap(user => metrics.increment("user.email.updated"))
+    );
+};
+```
+
+## Summary
+
+<AccordionGroup>
+  <Accordion title="map() - Transform success values">
+    Use when transformation **cannot fail**. Errors pass through unchanged.
+    
+    ```typescript
+    Result.ok(x).map(transform) // Ok(transform(x))
+    Result.err(e).map(transform) // Err(e)
+    ```
+  </Accordion>
+  
+  <Accordion title="mapError() - Transform error values">
+    Use to normalize error types or add context. Success values pass through.
+    
+    ```typescript
+    Result.ok(x).mapError(transform) // Ok(x)
+    Result.err(e).mapError(transform) // Err(transform(e))
+    ```
+  </Accordion>
+  
+  <Accordion title="andThen() - Chain failing operations">
+    Use when transformation **can fail** and returns a Result. Errors short-circuit.
+    
+    ```typescript
+    Result.ok(x).andThen(f) // f(x)
+    Result.err(e).andThen(f) // Err(e) - f not called
+    ```
+  </Accordion>
+  
+  <Accordion title="tap() - Run side effects">
+    Use for logging, metrics, or debugging. Returns original Result unchanged.
+    
+    ```typescript
+    Result.ok(x).tap(sideEffect) // Ok(x) after calling sideEffect(x)
+    Result.err(e).tap(sideEffect) // Err(e) - sideEffect not called
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pattern Matching" icon="code-branch" href="/core/pattern-matching">
+    Learn how to handle both success and error cases with match()
+  </Card>
+  
+  <Card title="Generator Composition" icon="layer-group" href="/core/generator-composition">
+    Master Result.gen() for imperative-style error handling
+  </Card>
+</CardGroup>

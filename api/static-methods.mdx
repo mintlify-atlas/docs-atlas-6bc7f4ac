@@ -1,0 +1,1061 @@
+---
+title: "Static Methods"
+description: "Static utility methods on the Result namespace"
+---
+
+## Creation
+
+### Result.ok()
+
+Creates a successful result. See [ok() and err()](/api/ok-and-err#resultok) for full documentation.
+
+```typescript
+Result.ok(42)  // Ok<number, never>
+Result.ok()    // Ok<void, never>
+```
+
+### Result.err()
+
+Creates an error result. See [ok() and err()](/api/ok-and-err#resulterr) for full documentation.
+
+```typescript
+Result.err("failed")  // Err<never, string>
+```
+
+## Error Handling
+
+### Result.try()
+
+Executes a synchronous function and wraps the result or error in a Result.
+
+#### Signatures
+
+```typescript
+// Without custom error handler
+Result.try<A>(
+  thunk: () => A,
+  config?: { retry?: { times: number } }
+): Result<A, UnhandledException>
+
+// With custom error handler
+Result.try<A, E>(
+  options: {
+    try: () => A;
+    catch: (cause: unknown) => E;
+  },
+  config?: { retry?: { times: number } }
+): Result<A, E>
+```
+
+#### Parameters
+
+<ParamField path="thunk" type="() => A">
+  Function to execute (simple form)
+</ParamField>
+
+<ParamField path="options" type="object">
+  Options object (custom error handler form)
+  
+  <ParamField path="options.try" type="() => A" required>
+    Function to execute
+  </ParamField>
+  
+  <ParamField path="options.catch" type="(cause: unknown) => E" required>
+    Custom error handler that transforms the caught error
+  </ParamField>
+</ParamField>
+
+<ParamField path="config" type="object">
+  Optional configuration
+  
+  <ParamField path="config.retry" type="object">
+    Retry configuration
+    
+    <ParamField path="config.retry.times" type="number" required>
+      Number of retry attempts
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<A, E | UnhandledException>">
+  Ok with the return value if successful, Err with error if it throws
+</ResponseField>
+
+#### Behavior
+
+- Executes the function in a try-catch block
+- Returns `Ok` with the result if successful
+- Returns `Err` with `UnhandledException` (or custom error) if it throws
+- Retries the specified number of times if configured
+- **Throws**: `Panic` if the custom `catch` handler throws
+
+#### Examples
+
+```typescript
+// Basic usage
+const result = Result.try(() => JSON.parse(jsonString));
+// Result<any, UnhandledException>
+
+if (result.isOk()) {
+  console.log(result.value);
+} else {
+  console.error("Parse failed:", result.error.cause);
+}
+
+// With custom error handler
+class ParseError extends TaggedError<"ParseError"> {
+  readonly _tag = "ParseError";
+  constructor(public input: string, public cause: unknown) {
+    super();
+  }
+}
+
+const result = Result.try({
+  try: () => JSON.parse(input),
+  catch: (e) => new ParseError(input, e),
+});
+// Result<any, ParseError>
+
+// With retry
+const result = Result.try(
+  () => unstableOperation(),
+  { retry: { times: 3 } }
+);
+```
+
+### Result.tryPromise()
+
+Executes an async function and wraps the result or error in a Result, with retry support.
+
+#### Signatures
+
+```typescript
+// Without custom error handler
+Result.tryPromise<A>(
+  thunk: () => Promise<A>,
+  config?: RetryConfig<UnhandledException>
+): Promise<Result<A, UnhandledException>>
+
+// With custom error handler
+Result.tryPromise<A, E>(
+  options: {
+    try: () => Promise<A>;
+    catch: (cause: unknown) => E | Promise<E>;
+  },
+  config?: RetryConfig<E>
+): Promise<Result<A, E>>
+```
+
+#### Parameters
+
+<ParamField path="thunk" type="() => Promise<A>">
+  Async function to execute (simple form)
+</ParamField>
+
+<ParamField path="options" type="object">
+  Options object (custom error handler form)
+  
+  <ParamField path="options.try" type="() => Promise<A>" required>
+    Async function to execute
+  </ParamField>
+  
+  <ParamField path="options.catch" type="(cause: unknown) => E | Promise<E>" required>
+    Custom error handler (can be async)
+  </ParamField>
+</ParamField>
+
+<ParamField path="config" type="RetryConfig<E>">
+  Optional retry configuration
+  
+  <ParamField path="config.retry" type="object">
+    Retry settings
+    
+    <ParamField path="config.retry.times" type="number" required>
+      Number of retry attempts
+    </ParamField>
+    
+    <ParamField path="config.retry.delayMs" type="number" required>
+      Base delay in milliseconds between retries
+    </ParamField>
+    
+    <ParamField path="config.retry.backoff" type='"constant" | "linear" | "exponential"' required>
+      Backoff strategy for delays
+    </ParamField>
+    
+    <ParamField path="config.retry.shouldRetry" type="(error: E) => boolean">
+      Predicate to determine if an error should trigger a retry. Defaults to always retry.
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Promise<Result<A, E | UnhandledException>>">
+  Promise of Ok with the return value if successful, Err with error if it rejects
+</ResponseField>
+
+#### Behavior
+
+- Awaits the async function in a try-catch block
+- Returns `Ok` with the result if successful
+- Returns `Err` with `UnhandledException` (or custom error) if it rejects
+- Supports retry with configurable backoff strategies
+- Supports conditional retry via `shouldRetry` predicate
+- **Throws**: `Panic` if the custom `catch` handler throws
+
+#### Examples
+
+```typescript
+// Basic usage
+const result = await Result.tryPromise(() => fetch(url));
+// Result<Response, UnhandledException>
+
+// With custom error handler
+class ApiError extends TaggedError<"ApiError"> {
+  readonly _tag = "ApiError";
+  constructor(public url: string, public cause: unknown) {
+    super();
+  }
+}
+
+const result = await Result.tryPromise({
+  try: () => fetch(url),
+  catch: (e) => new ApiError(url, e),
+});
+// Result<Response, ApiError>
+
+// With exponential backoff retry
+const result = await Result.tryPromise(
+  () => fetch(url),
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: "exponential", // 100ms, 200ms, 400ms
+    },
+  }
+);
+
+// Conditional retry based on error type
+const result = await Result.tryPromise(
+  {
+    try: () => apiCall(url),
+    catch: (e) => e instanceof NetworkError 
+      ? new RetryableError(e) 
+      : new FatalError(e),
+  },
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: "exponential",
+      shouldRetry: (error) => error._tag === "RetryableError",
+    },
+  }
+);
+
+// Async error enrichment
+const result = await Result.tryPromise(
+  {
+    try: () => callApi(url),
+    catch: async (e) => {
+      const rateLimited = await redis.get(`ratelimit:${userId}`);
+      return new ApiError({ cause: e, rateLimited: !!rateLimited });
+    },
+  },
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: "exponential",
+      shouldRetry: (e) => !e.rateLimited,
+    },
+  }
+);
+```
+
+## Transformation
+
+### Result.map()
+
+Transforms the success value. Supports both data-first and data-last (pipeable) forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.map<A, B, E>(
+  result: Result<A, E>,
+  fn: (a: A) => B
+): Result<B, E>
+
+// Data-last (pipeable)
+Result.map<A, B>(
+  fn: (a: A) => B
+): <E>(result: Result<A, E>) => Result<B, E>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = Result.map(Result.ok(2), x => x * 2);
+// Ok(4)
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const result = pipe(
+  Result.ok(2),
+  Result.map(x => x * 2),
+  Result.map(x => x.toString())
+);
+// Ok("4")
+```
+
+### Result.mapError()
+
+Transforms the error value. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.mapError<A, E, E2>(
+  result: Result<A, E>,
+  fn: (e: E) => E2
+): Result<A, E2>
+
+// Data-last (pipeable)
+Result.mapError<E, E2>(
+  fn: (e: E) => E2
+): <A>(result: Result<A, E>) => Result<A, E2>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = Result.mapError(
+  Result.err("not found"),
+  msg => new Error(msg)
+);
+// Err(Error("not found"))
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const result = pipe(
+  Result.err("not found"),
+  Result.mapError(msg => new Error(msg))
+);
+```
+
+### Result.andThen()
+
+Chains a Result-returning function. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.andThen<A, B, E, E2>(
+  result: Result<A, E>,
+  fn: (a: A) => Result<B, E2>
+): Result<B, E | E2>
+
+// Data-last (pipeable)
+Result.andThen<A, B, E2>(
+  fn: (a: A) => Result<B, E2>
+): <E>(result: Result<A, E>) => Result<B, E | E2>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = Result.andThen(
+  Result.ok(2),
+  x => x > 0 ? Result.ok(x) : Result.err("negative")
+);
+// Ok(2)
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const result = pipe(
+  Result.ok(5),
+  Result.andThen(x => x > 0 ? Result.ok(x) : Result.err("non-positive")),
+  Result.andThen(x => x < 10 ? Result.ok(x * 2) : Result.err("too large"))
+);
+// Ok(10)
+```
+
+### Result.andThenAsync()
+
+Chains an async Result-returning function. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.andThenAsync<A, B, E, E2>(
+  result: Result<A, E>,
+  fn: (a: A) => Promise<Result<B, E2>>
+): Promise<Result<B, E | E2>>
+
+// Data-last (pipeable)
+Result.andThenAsync<A, B, E2>(
+  fn: (a: A) => Promise<Result<B, E2>>
+): <E>(result: Result<A, E>) => Promise<Result<B, E | E2>>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = await Result.andThenAsync(
+  Result.ok(userId),
+  async (id) => {
+    const user = await fetchUser(id);
+    return Result.ok(user);
+  }
+);
+
+// Data-last (pipeable)
+const result = await pipe(
+  Result.ok(userId),
+  Result.andThenAsync(async (id) => {
+    const user = await db.getUser(id);
+    return user ? Result.ok(user) : Result.err("not found");
+  })
+);
+```
+
+### Result.flatten()
+
+Flattens a nested Result into a single Result.
+
+```typescript
+Result.flatten<T, E, E2>(
+  result: Result<Result<T, E>, E2>
+): Result<T, E | E2>
+```
+
+#### Parameters
+
+<ParamField path="result" type="Result<Result<T, E>, E2>" required>
+  Nested Result to flatten
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<T, E | E2>">
+  Flattened Result with union of both error types
+</ResponseField>
+
+#### Examples
+
+```typescript
+const nested: Result<Result<number, string>, Error> = 
+  Result.ok(Result.ok(42));
+
+const flat = Result.flatten(nested);
+// Ok(42): Result<number, string | Error>
+
+// With error in outer layer
+const nested = Result.err<Result<number, string>, Error>(new Error("outer"));
+const flat = Result.flatten(nested);
+// Err(Error("outer")): Result<number, string | Error>
+
+// With error in inner layer
+const nested = Result.ok(Result.err<number, string>("inner"));
+const flat = Result.flatten(nested);
+// Err("inner"): Result<number, string>
+```
+
+## Pattern Matching
+
+### Result.match()
+
+Pattern matches on a Result. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.match<A, E, T>(
+  result: Result<A, E>,
+  handlers: {
+    ok: (a: A) => T;
+    err: (e: E) => T;
+  }
+): T
+
+// Data-last (pipeable)
+Result.match<A, E, T>(
+  handlers: {
+    ok: (a: A) => T;
+    err: (e: E) => T;
+  }
+): (result: Result<A, E>) => T
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const output = Result.match(
+  Result.ok(42),
+  {
+    ok: (n) => `Success: ${n}`,
+    err: (e) => `Error: ${e}`,
+  }
+);
+// "Success: 42"
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const output = pipe(
+  getUserResult(),
+  Result.match({
+    ok: (user) => ({ status: 200, body: user }),
+    err: (error) => ({ status: 500, body: { error } }),
+  })
+);
+```
+
+## Side Effects
+
+### Result.tap()
+
+Runs a side effect on success. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.tap<A, E>(
+  result: Result<A, E>,
+  fn: (a: A) => void
+): Result<A, E>
+
+// Data-last (pipeable)
+Result.tap<A>(
+  fn: (a: A) => void
+): <E>(result: Result<A, E>) => Result<A, E>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = Result.tap(
+  Result.ok(user),
+  (u) => console.log("User:", u)
+);
+// Logs "User: {...}" and returns Ok(user)
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const result = pipe(
+  Result.ok(2),
+  Result.tap(x => console.log("Value:", x)),
+  Result.map(x => x * 2)
+);
+```
+
+### Result.tapAsync()
+
+Runs an async side effect on success. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.tapAsync<A, E>(
+  result: Result<A, E>,
+  fn: (a: A) => Promise<void>
+): Promise<Result<A, E>>
+
+// Data-last (pipeable)
+Result.tapAsync<A>(
+  fn: (a: A) => Promise<void>
+): <E>(result: Result<A, E>) => Promise<Result<A, E>>
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const result = await Result.tapAsync(
+  Result.ok(user),
+  async (u) => {
+    await analytics.track("user_loaded", { id: u.id });
+  }
+);
+
+// Data-last (pipeable)
+const result = await pipe(
+  Result.ok(data),
+  Result.tapAsync(async (d) => {
+    await logger.info("Data loaded", d);
+  })
+);
+```
+
+## Unwrapping
+
+### Result.unwrap()
+
+Extracts the value or throws.
+
+```typescript
+Result.unwrap<A, E>(result: Result<A, E>, message?: string): A
+```
+
+#### Parameters
+
+<ParamField path="result" type="Result<A, E>" required>
+  Result to unwrap
+</ParamField>
+
+<ParamField path="message" type="string">
+  Optional custom error message
+</ParamField>
+
+#### Returns
+
+<ResponseField name="value" type="A">
+  The success value if Ok
+</ResponseField>
+
+#### Examples
+
+```typescript
+const value = Result.unwrap(Result.ok(42));
+// 42
+
+Result.unwrap(Result.err("failed")); 
+// throws Panic
+
+Result.unwrap(Result.err("failed"), "Custom message");
+// throws Panic with "Custom message"
+```
+
+### Result.unwrapOr()
+
+Extracts the value or returns a fallback. Supports both data-first and data-last forms.
+
+#### Signatures
+
+```typescript
+// Data-first
+Result.unwrapOr<A, E, B>(
+  result: Result<A, E>,
+  fallback: B
+): A | B
+
+// Data-last (pipeable)
+Result.unwrapOr<B>(
+  fallback: B
+): <A, E>(result: Result<A, E>) => A | B
+```
+
+#### Examples
+
+```typescript
+// Data-first
+const value = Result.unwrapOr(Result.ok(42), 0);
+// 42
+
+const value = Result.unwrapOr(Result.err("failed"), 0);
+// 0
+
+// Data-last (pipeable)
+import { pipe } from "fp-ts/function";
+
+const value = pipe(
+  getUserName(id),
+  Result.unwrapOr("Anonymous")
+);
+```
+
+## Generator Composition
+
+### Result.gen()
+
+Generator-based composition for Result types using `yield*` syntax.
+
+#### Signatures
+
+```typescript
+// Sync generator
+Result.gen<Yield extends Err<never, unknown>, R extends AnyResult>(
+  body: () => Generator<Yield, R, unknown>
+): Result<InferOk<R>, InferYieldErr<Yield> | InferErr<R>>
+
+// Sync generator with thisArg
+Result.gen<Yield extends Err<never, unknown>, R extends AnyResult, This>(
+  body: (this: This) => Generator<Yield, R, unknown>,
+  thisArg: This
+): Result<InferOk<R>, InferYieldErr<Yield> | InferErr<R>>
+
+// Async generator
+Result.gen<Yield extends Err<never, unknown>, R extends AnyResult>(
+  body: () => AsyncGenerator<Yield, R, unknown>
+): Promise<Result<InferOk<R>, InferYieldErr<Yield> | InferErr<R>>>
+
+// Async generator with thisArg
+Result.gen<Yield extends Err<never, unknown>, R extends AnyResult, This>(
+  body: (this: This) => AsyncGenerator<Yield, R, unknown>,
+  thisArg: This
+): Promise<Result<InferOk<R>, InferYieldErr<Yield> | InferErr<R>>>
+```
+
+#### Parameters
+
+<ParamField path="body" type="() => Generator | AsyncGenerator" required>
+  Generator function that yields Results and returns a final Result
+</ParamField>
+
+<ParamField path="thisArg" type="This">
+  Optional `this` context for the generator function
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<T, E> | Promise<Result<T, E>>">
+  Result with success type from the return value and error type as union of all yielded errors
+</ResponseField>
+
+#### Behavior
+
+- Use `yield*` to unwrap Result values in the generator
+- If any yielded Result is Err, the generator short-circuits and returns that Err
+- If all yields succeed, the final returned Result is returned
+- Error types from all yields form a union automatically
+- Supports both sync and async generators
+- **Throws**: `Panic` if generator body or cleanup throws
+
+#### Examples
+
+```typescript
+// Basic composition
+const result = Result.gen(function* () {
+  const a = yield* getA(); // Result<A, ErrorA>
+  const b = yield* getB(a); // Result<B, ErrorB>
+  return Result.ok({ a, b });
+});
+// Result<{a: A, b: B}, ErrorA | ErrorB>
+
+// Short-circuit on first error
+const result = Result.gen(function* () {
+  const a = yield* Result.ok(1);
+  const b = yield* Result.err("failed"); // Short-circuits here
+  const c = yield* Result.ok(3); // Never executed
+  return Result.ok({ a, b, c });
+});
+// Err("failed")
+
+// Normalize error types with mapError
+const result = Result.gen(function* () {
+  const a = yield* getA();
+  const b = yield* getB(a);
+  return Result.ok({ a, b });
+}).mapError(e => new UnifiedError(e._tag, e.message));
+// Result<{a, b}, UnifiedError>
+
+// Async generators with Result.await
+const result = await Result.gen(async function* () {
+  const userId = yield* getUserId();
+  const user = yield* Result.await(fetchUser(userId));
+  const profile = yield* Result.await(fetchProfile(user.id));
+  return Result.ok({ user, profile });
+});
+
+// With thisArg context
+class UserService {
+  constructor(private db: Database) {}
+  
+  getFullUser(id: string) {
+    return Result.gen(function* () {
+      const user = yield* this.getUser(id);
+      const profile = yield* this.getProfile(user.id);
+      return Result.ok({ user, profile });
+    }, this); // Pass 'this' context
+  }
+}
+
+// Complex workflow
+const result = Result.gen(function* () {
+  // Validate input
+  const input = yield* validateInput(data);
+  
+  // Fetch dependencies
+  const userResult = yield* getUser(input.userId);
+  const configResult = yield* getConfig(input.configId);
+  
+  // Transform data
+  const processed = yield* processData({
+    input,
+    user: userResult,
+    config: configResult,
+  });
+  
+  // Return final result
+  return Result.ok(processed);
+});
+// All error types automatically unified
+```
+
+### Result.await()
+
+Wraps a `Promise<Result>` to be yieldable in async `Result.gen()` blocks.
+
+```typescript
+Result.await<T, E>(
+  promise: Promise<Result<T, E>>
+): AsyncGenerator<Err<never, E>, T, unknown>
+```
+
+#### Parameters
+
+<ParamField path="promise" type="Promise<Result<T, E>>" required>
+  Promise of Result to await and unwrap
+</ParamField>
+
+#### Returns
+
+<ResponseField name="generator" type="AsyncGenerator<Err<never, E>, T, unknown>">
+  Async generator that yields the error if Err, otherwise returns the value
+</ResponseField>
+
+#### Behavior
+
+- Awaits the Promise
+- If Result is Ok, returns the value
+- If Result is Err, yields the error (short-circuits the generator)
+- Must be used with `yield*` inside `Result.gen()` async generators
+
+#### Examples
+
+```typescript
+// Basic async composition
+const result = await Result.gen(async function* () {
+  const user = yield* Result.await(fetchUser(id));
+  const profile = yield* Result.await(fetchProfile(user.id));
+  return Result.ok({ user, profile });
+});
+
+// Mixing sync and async Results
+const result = await Result.gen(async function* () {
+  // Sync Result - use yield* directly
+  const validated = yield* validateInput(data);
+  
+  // Async Result - use Result.await
+  const user = yield* Result.await(api.getUser(validated.userId));
+  
+  // Async Result from tryPromise
+  const config = yield* Result.await(
+    Result.tryPromise(() => fetchConfig(user.configId))
+  );
+  
+  return Result.ok({ validated, user, config });
+});
+
+// Sequential async operations
+const result = await Result.gen(async function* () {
+  const token = yield* Result.await(authenticate(credentials));
+  const session = yield* Result.await(createSession(token));
+  const user = yield* Result.await(loadUser(session.userId));
+  return Result.ok({ session, user });
+});
+```
+
+## Utilities
+
+### Result.partition()
+
+Splits an array of Results into separate arrays of success values and error values.
+
+```typescript
+Result.partition<T, E>(
+  results: readonly Result<T, E>[]
+): [T[], E[]]
+```
+
+#### Parameters
+
+<ParamField path="results" type="readonly Result<T, E>[]" required>
+  Array of Results to partition
+</ParamField>
+
+#### Returns
+
+<ResponseField name="tuple" type="[T[], E[]]">
+  Tuple of [success values, error values]
+</ResponseField>
+
+#### Examples
+
+```typescript
+const results = [
+  Result.ok(1),
+  Result.err("a"),
+  Result.ok(2),
+  Result.err("b"),
+  Result.ok(3),
+];
+
+const [oks, errs] = Result.partition(results);
+// oks: [1, 2, 3]
+// errs: ["a", "b"]
+
+// Processing multiple operations
+const userIds = ["1", "2", "3"];
+const results = userIds.map(id => getUser(id));
+const [users, errors] = Result.partition(results);
+
+if (errors.length > 0) {
+  console.error("Failed to load some users:", errors);
+}
+
+console.log("Loaded users:", users);
+```
+
+## Serialization
+
+### Result.serialize()
+
+Converts a Result to a plain object for serialization (e.g., JSON, RPC, server actions).
+
+```typescript
+Result.serialize<T, E>(
+  result: Result<T, E>
+): SerializedResult<T, E>
+```
+
+#### Parameters
+
+<ParamField path="result" type="Result<T, E>" required>
+  Result to serialize
+</ParamField>
+
+#### Returns
+
+<ResponseField name="serialized" type="SerializedResult<T, E>">
+  Plain object with `status` and either `value` (Ok) or `error` (Err)
+</ResponseField>
+
+#### Type Definitions
+
+```typescript
+type SerializedOk<T> = {
+  status: "ok";
+  value: T;
+};
+
+type SerializedErr<E> = {
+  status: "error";
+  error: E;
+};
+
+type SerializedResult<T, E> = SerializedOk<T> | SerializedErr<E>;
+```
+
+#### Examples
+
+```typescript
+// Serialize Ok
+const serialized = Result.serialize(Result.ok(42));
+// { status: "ok", value: 42 }
+
+// Serialize Err
+const serialized = Result.serialize(Result.err("failed"));
+// { status: "error", error: "failed" }
+
+// Server action (Next.js)
+export async function getUserAction(id: string) {
+  const result = await getUser(id);
+  return Result.serialize(result); // Safe to send over RPC
+}
+```
+
+### Result.deserialize()
+
+Rehydrates a serialized Result back into Ok/Err instances.
+
+```typescript
+Result.deserialize<T, E>(
+  value: unknown
+): Result<T, E | ResultDeserializationError>
+```
+
+#### Parameters
+
+<ParamField path="value" type="unknown" required>
+  Value to deserialize (typically from RPC or JSON)
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<T, E | ResultDeserializationError>">
+  Deserialized Result if valid, otherwise `Err<ResultDeserializationError>`
+</ResponseField>
+
+#### Behavior
+
+- Validates that the input is a valid serialized Result
+- Returns `Ok` or `Err` instance if valid
+- Returns `Err<ResultDeserializationError>` if invalid
+
+#### Examples
+
+```typescript
+// Valid serialized Result
+const rpcResponse = { status: "ok", value: { id: "1", name: "Alice" } };
+
+const result = Result.deserialize<User, AppError>(rpcResponse);
+
+if (Result.isOk(result)) {
+  console.log(result.value); // User: { id: "1", name: "Alice" }
+}
+
+// Invalid input
+const invalid = { foo: "bar" };
+const result = Result.deserialize(invalid);
+
+if (Result.isError(result) && ResultDeserializationError.is(result.error)) {
+  console.log("Bad input:", result.error.value);
+}
+
+// Client-side (Next.js)
+const response = await getUserAction(id);
+const result = Result.deserialize<User, AppError>(response);
+
+return result.match({
+  ok: (user) => <UserProfile user={user} />,
+  err: (error) => <ErrorMessage error={error} />,
+});
+```
+
+## Type Guards
+
+### Result.isOk()
+
+See [ok() and err()](/api/ok-and-err#resultisok) for documentation.
+
+### Result.isError()
+
+See [ok() and err()](/api/ok-and-err#resultiserror) for documentation.
+
+## See Also
+
+- [Result Type Overview](/api/result)
+- [Creating Results with ok() and err()](/api/ok-and-err)
+- [Instance Methods](/api/instance-methods)

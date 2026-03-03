@@ -1,0 +1,399 @@
+---
+title: Creating Results
+description: Learn how to create Result instances with Result.ok(), Result.err(), Result.try(), and Result.tryPromise()
+---
+
+## Overview
+
+The Result type has four primary ways to create instances:
+- `Result.ok()` for successful values
+- `Result.err()` for error values
+- `Result.try()` for wrapping sync functions that may throw
+- `Result.tryPromise()` for wrapping async functions with retry support
+
+## Creating Success Results
+
+### Result.ok()
+
+Creates an `Ok` instance wrapping a successful value.
+
+```typescript
+const success = Result.ok(42);
+// Ok<number, never>
+
+const withObject = Result.ok({ id: 1, name: "Alice" });
+// Ok<{ id: number, name: string }, never>
+```
+
+#### Creating Ok\<void\>
+
+For side-effectful operations that don't return a meaningful value, call `Result.ok()` without arguments:
+
+```typescript
+const saveUser = (user: User): Result<void, SaveError> => {
+  // ... save logic ...
+  return Result.ok(); // Ok<void, SaveError>
+};
+
+const result = saveUser(user);
+if (result.isOk()) {
+  console.log("Saved successfully");
+}
+```
+
+<Info>
+`Result.ok()` creates an `Ok<void, never>` which is compatible with `Result<void, E>` for any error type `E`.
+</Info>
+
+### Type Signature
+
+```typescript
+function ok(): Ok<void, never>;
+function ok<A, E = never>(value: A): Ok<A, E>;
+```
+
+## Creating Error Results
+
+### Result.err()
+
+Creates an `Err` instance wrapping an error value.
+
+```typescript
+const failure = Result.err("Something went wrong");
+// Err<never, string>
+
+const withError = Result.err(new Error("Network timeout"));
+// Err<never, Error>
+```
+
+#### Using TaggedError for Discriminated Errors
+
+For type-safe error handling, use `TaggedError` to create discriminated error classes:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+type AppError = NotFoundError | ValidationError;
+
+const fetchUser = (id: string): Result<User, AppError> => {
+  if (!id) {
+    return Result.err(new ValidationError({ 
+      field: "id", 
+      message: "ID is required" 
+    }));
+  }
+  // ...
+};
+```
+
+<Tip>
+See [Error Handling](/core/error-handling) for comprehensive TaggedError patterns.
+</Tip>
+
+### Type Signature
+
+```typescript
+function err<T = never, E = unknown>(error: E): Err<T, E>;
+```
+
+## Wrapping Throwing Functions
+
+### Result.try()
+
+Executes a synchronous function and wraps the result or exception in a Result.
+
+#### Basic Usage
+
+```typescript
+const parseJSON = (str: string): Result<unknown, UnhandledException> => {
+  return Result.try(() => JSON.parse(str));
+};
+
+const result = parseJSON('{"key": "value"}');
+// Ok({ key: "value" })
+
+const failed = parseJSON('invalid');
+// Err(UnhandledException)
+```
+
+#### Custom Error Handling
+
+Transform caught exceptions into domain-specific errors using the `catch` handler:
+
+```typescript
+class ParseError extends TaggedError("ParseError")<{
+  input: string;
+  message: string;
+  cause: unknown;
+}>() {}
+
+const parseJSON = (str: string): Result<unknown, ParseError> => {
+  return Result.try({
+    try: () => JSON.parse(str),
+    catch: (cause) => new ParseError({
+      input: str,
+      message: `Failed to parse JSON: ${str.slice(0, 50)}`,
+      cause,
+    }),
+  });
+};
+```
+
+<Warning>
+If your `catch` handler throws, Result.try will throw a `Panic`. Catch handlers should always return an error value, never throw.
+</Warning>
+
+#### Retry on Failure
+
+```typescript
+let attempts = 0;
+const result = Result.try(
+  () => {
+    attempts++;
+    if (attempts < 3) throw new Error("fail");
+    return "success";
+  },
+  { retry: { times: 3 } }
+);
+// Ok("success") after 3 attempts
+```
+
+### Type Signature
+
+```typescript
+function try<A>(
+  thunk: () => A,
+  config?: { retry?: { times: number } }
+): Result<A, UnhandledException>;
+
+function try<A, E>(
+  options: { 
+    try: () => A; 
+    catch: (cause: unknown) => E 
+  },
+  config?: { retry?: { times: number } }
+): Result<A, E>;
+```
+
+## Wrapping Async Functions
+
+### Result.tryPromise()
+
+Executes an async function and wraps the result or rejection in a Result, with advanced retry support.
+
+#### Basic Usage
+
+```typescript
+const fetchUser = async (id: string) => {
+  const result = await Result.tryPromise(() => 
+    fetch(`/api/users/${id}`).then(r => r.json())
+  );
+  
+  return result; // Result<User, UnhandledException>
+};
+```
+
+#### Custom Error Handling
+
+```typescript
+class ApiError extends TaggedError("ApiError")<{
+  status: number;
+  message: string;
+  cause: unknown;
+}>() {}
+
+const fetchUser = async (id: string): Promise<Result<User, ApiError>> => {
+  return Result.tryPromise({
+    try: async () => {
+      const response = await fetch(`/api/users/${id}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response.json();
+    },
+    catch: (cause) => new ApiError({
+      status: cause instanceof Error ? 500 : 0,
+      message: cause instanceof Error ? cause.message : String(cause),
+      cause,
+    }),
+  });
+};
+```
+
+#### Retry with Exponential Backoff
+
+```typescript
+const fetchWithRetry = async (url: string) => {
+  return Result.tryPromise(
+    () => fetch(url).then(r => r.json()),
+    {
+      retry: {
+        times: 3,
+        delayMs: 100,
+        backoff: "exponential", // 100ms, 200ms, 400ms
+      },
+    }
+  );
+};
+```
+
+#### Conditional Retry
+
+Use `shouldRetry` to retry only specific errors:
+
+```typescript
+class RetryableError extends TaggedError("RetryableError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+class FatalError extends TaggedError("FatalError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+type ApiError = RetryableError | FatalError;
+
+const result = await Result.tryPromise(
+  {
+    try: () => callApi(url),
+    catch: (e) => {
+      if (e instanceof TypeError) {
+        return new RetryableError({ message: "Network error", cause: e });
+      }
+      return new FatalError({ message: "Fatal error", cause: e });
+    },
+  },
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: "exponential",
+      shouldRetry: (e) => e._tag === "RetryableError",
+    },
+  }
+);
+```
+
+<Note>
+The `shouldRetry` predicate receives the error returned by your `catch` handler, allowing you to make retry decisions based on enriched error context.
+</Note>
+
+### Backoff Strategies
+
+<CodeGroup>
+```typescript Constant
+{
+  retry: {
+    times: 3,
+    delayMs: 100,
+    backoff: "constant", // 100ms, 100ms, 100ms
+  }
+}
+```
+
+```typescript Linear
+{
+  retry: {
+    times: 3,
+    delayMs: 100,
+    backoff: "linear", // 100ms, 200ms, 300ms
+  }
+}
+```
+
+```typescript Exponential
+{
+  retry: {
+    times: 3,
+    delayMs: 100,
+    backoff: "exponential", // 100ms, 200ms, 400ms
+  }
+}
+```
+</CodeGroup>
+
+### Type Signature
+
+```typescript
+function tryPromise<A>(
+  thunk: () => Promise<A>,
+  config?: RetryConfig<UnhandledException>
+): Promise<Result<A, UnhandledException>>;
+
+function tryPromise<A, E>(
+  options: { 
+    try: () => Promise<A>; 
+    catch: (cause: unknown) => E | Promise<E> 
+  },
+  config?: RetryConfig<E>
+): Promise<Result<A, E>>;
+
+type RetryConfig<E> = {
+  retry?: {
+    times: number;
+    delayMs: number;
+    backoff: "linear" | "constant" | "exponential";
+    shouldRetry?: (error: E) => boolean;
+  };
+};
+```
+
+## When to Use Each Method
+
+<Tabs>
+  <Tab title="Result.ok()">
+    Use when you already have a success value and want to wrap it in a Result.
+    
+    ```typescript
+    const validated = validateInput(data);
+    return Result.ok(validated);
+    ```
+  </Tab>
+  
+  <Tab title="Result.err()">
+    Use when you've detected an error condition and want to return it.
+    
+    ```typescript
+    if (!user) {
+      return Result.err(new NotFoundError({ id, message: "User not found" }));
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Result.try()">
+    Use to wrap third-party sync functions that throw exceptions.
+    
+    ```typescript
+    const parsed = Result.try(() => JSON.parse(input));
+    ```
+  </Tab>
+  
+  <Tab title="Result.tryPromise()">
+    Use to wrap async operations with automatic error handling and retry logic.
+    
+    ```typescript
+    const data = await Result.tryPromise(() => fetch(url));
+    ```
+  </Tab>
+</Tabs>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Transforming Results" icon="wand-magic-sparkles" href="/core/transforming-results">
+    Learn how to transform success and error values with map, mapError, and andThen
+  </Card>
+  
+  <Card title="Error Handling" icon="triangle-exclamation" href="/core/error-handling">
+    Master TaggedError, exhaustive matching, and error recovery patterns
+  </Card>
+</CardGroup>

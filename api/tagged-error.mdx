@@ -1,0 +1,363 @@
+---
+title: TaggedError
+description: Factory for creating discriminated error classes with type-safe pattern matching
+---
+
+## Overview
+
+`TaggedError` is a factory function that creates custom error classes with a `_tag` discriminator property. This enables exhaustive pattern matching, type-safe error unions, and improved error handling with full type inference.
+
+Tagged errors integrate seamlessly with `Result` types and support cause chaining, JSON serialization, and runtime type guards.
+
+## Factory Function
+
+```typescript
+TaggedError<Tag extends string>(
+  tag: Tag
+): <Props extends Record<string, unknown> = {}>() => TaggedErrorClass<Tag, Props>
+```
+
+### Parameters
+
+<ParamField path="tag" type="string" required>
+  The discriminator tag for this error class. Used for pattern matching and type narrowing.
+</ParamField>
+
+### Returns
+
+Returns a function that creates a class constructor. Call it immediately with type parameters to get your error class:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+```
+
+## Instance Properties
+
+<ResponseField name="_tag" type="string" required>
+  The discriminator tag identifying this error type. Used for exhaustive pattern matching.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Optional error message. If included in Props, will be passed to Error constructor.
+</ResponseField>
+
+<ResponseField name="cause" type="unknown">
+  Optional error cause. If included in Props, will be chained in the stack trace.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Error name, set to the tag value.
+</ResponseField>
+
+<ResponseField name="stack" type="string | undefined">
+  Stack trace. When `cause` is an Error, its stack is appended with "Caused by:" prefix.
+</ResponseField>
+
+## Static Methods
+
+### is()
+
+Type guard for checking error instances.
+
+```typescript
+static is(value: unknown): value is TaggedErrorInstance<Tag, Props>
+```
+
+#### Global Type Guard
+
+```typescript
+TaggedError.is(value: unknown): value is AnyTaggedError
+```
+
+Checks if a value is ANY TaggedError instance:
+
+```typescript
+if (TaggedError.is(error)) {
+  console.log(error._tag); // string - any tag
+}
+```
+
+#### Class-Specific Type Guard
+
+Each error class has its own `is()` method:
+
+```typescript
+if (NotFoundError.is(error)) {
+  console.log(error.id); // Narrowed to NotFoundError
+}
+```
+
+## Instance Methods
+
+### toJSON()
+
+Serializes the error to a plain object.
+
+```typescript
+toJSON(): object
+```
+
+**Returns:** Object containing all properties including `_tag`, `name`, `message`, `cause`, and `stack`.
+
+## Basic Usage
+
+### Creating Tagged Errors
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+type AppError = NotFoundError | ValidationError;
+```
+
+### Creating Instances
+
+```typescript
+const notFound = new NotFoundError({
+  id: "user-123",
+  message: "User not found"
+});
+
+console.log(notFound._tag);    // "NotFoundError"
+console.log(notFound.id);      // "user-123"
+console.log(notFound.message); // "User not found"
+```
+
+### With Result Types
+
+```typescript
+function findUser(id: string): Result<User, NotFoundError> {
+  const user = db.users.get(id);
+  if (!user) {
+    return Result.err(new NotFoundError({ id, message: `User ${id} not found` }));
+  }
+  return Result.ok(user);
+}
+```
+
+## Pattern Matching
+
+### Exhaustive Matching
+
+Use `matchError` for type-safe exhaustive pattern matching:
+
+```typescript
+import { matchError } from "better-result";
+
+function handleError(error: AppError): string {
+  return matchError(error, {
+    NotFoundError: (e) => `Missing: ${e.id}`,
+    ValidationError: (e) => `Invalid field: ${e.field}`
+  });
+}
+```
+
+<CodeGroup>
+```typescript Data-First
+matchError(error, {
+  NotFoundError: (e) => `Missing: ${e.id}`,
+  ValidationError: (e) => `Invalid: ${e.field}`
+});
+```
+
+```typescript Data-Last (Pipeable)
+import { pipe } from "better-result";
+
+pipe(
+  error,
+  matchError({
+    NotFoundError: (e) => `Missing: ${e.id}`,
+    ValidationError: (e) => `Invalid: ${e.field}`
+  })
+);
+```
+</CodeGroup>
+
+### Partial Matching with Fallback
+
+Use `matchErrorPartial` when you only want to handle specific error types:
+
+```typescript
+import { matchErrorPartial } from "better-result";
+
+function handleError(error: AppError): string {
+  return matchErrorPartial(
+    error,
+    {
+      NotFoundError: (e) => `Missing: ${e.id}`
+      // Only handle NotFoundError
+    },
+    (e) => {
+      // Fallback receives ValidationError only
+      // Type is narrowed to exclude handled errors
+      return `Other error: ${e._tag}`;
+    }
+  );
+}
+```
+
+<Note>
+  The fallback parameter's type is automatically narrowed to exclude handled error types.
+</Note>
+
+## Advanced Features
+
+### Error Cause Chaining
+
+Automatically chains causes in stack traces:
+
+```typescript
+class DatabaseError extends TaggedError("DatabaseError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+try {
+  await db.query(sql);
+} catch (cause) {
+  throw new DatabaseError({
+    message: "Failed to fetch user",
+    cause
+  });
+}
+```
+
+Stack trace will include:
+```
+DatabaseError: Failed to fetch user
+    at ...
+Caused by:
+  Error: Connection timeout
+    at ...
+```
+
+### No-Props Errors
+
+Create errors without additional properties:
+
+```typescript
+class TimeoutError extends TaggedError("TimeoutError")<{}>() {}
+
+const timeout = new TimeoutError(); // No args required
+```
+
+### Custom Constructors
+
+Override the constructor for custom initialization logic:
+
+```typescript
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+  input: string;
+  line: number;
+}>() {
+  constructor(args: { input: string; line: number }) {
+    const message = `Parse error at line ${args.line}`;
+    super({ ...args, message });
+  }
+}
+
+// Usage - message derived automatically
+const error = new ParseError({ input: "...", line: 42 });
+console.log(error.message); // "Parse error at line 42"
+```
+
+### JSON Serialization
+
+```typescript
+const error = new NotFoundError({ id: "123", message: "Not found" });
+
+const json = error.toJSON();
+// {
+//   _tag: "NotFoundError",
+//   name: "NotFoundError",
+//   message: "Not found",
+//   id: "123",
+//   cause: undefined,
+//   stack: "..."
+// }
+
+console.log(JSON.stringify(error));
+```
+
+## Type Guards
+
+### Class-Specific Guards
+
+```typescript
+function handleError(error: unknown) {
+  if (NotFoundError.is(error)) {
+    console.log(error.id); // Type is NotFoundError
+    console.log(error._tag); // "NotFoundError"
+  }
+}
+```
+
+### Generic TaggedError Guard
+
+```typescript
+import { isTaggedError } from "better-result";
+
+function logError(error: unknown) {
+  if (isTaggedError(error)) {
+    console.log(`Error: ${error._tag}`);
+  }
+}
+```
+
+## Best Practices
+
+<Warning>
+  Always include a `message` property in your error Props for better debugging.
+</Warning>
+
+1. **Use descriptive tags**: Make tags match the class name for clarity
+   ```typescript
+   class NotFoundError extends TaggedError("NotFoundError") // ✅ Good
+   class NotFoundError extends TaggedError("NFE")          // ❌ Unclear
+   ```
+
+2. **Type error unions**: Create union types for domain-specific errors
+   ```typescript
+   type AuthError = InvalidCredentials | TokenExpired | UserNotFound;
+   type ApiError = NetworkError | RateLimited | ServerError;
+   ```
+
+3. **Exhaustive matching**: Use `matchError` instead of if/else chains
+   ```typescript
+   // ✅ Exhaustive - TypeScript enforces all cases
+   matchError(error, {
+     NotFoundError: ...,
+     ValidationError: ...
+   });
+   
+   // ❌ Non-exhaustive - missing cases not caught
+   if (error._tag === "NotFoundError") { ... }
+   ```
+
+4. **Include metadata**: Add relevant context to error properties
+   ```typescript
+   class ValidationError extends TaggedError("ValidationError")<{
+     field: string;
+     value: unknown;
+     constraint: string;
+     message: string;
+   }>() {}
+   ```
+
+## See Also
+
+- [UnhandledException](/api/unhandled-exception) - Wrapper for caught exceptions
+- [Panic](/api/panic) - Unrecoverable errors
+- [Result](/api/result) - Error handling with Result types
+- [matchError](#pattern-matching) - Pattern matching functions

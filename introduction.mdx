@@ -1,0 +1,162 @@
+---
+title: Introduction
+description: Lightweight Result type for TypeScript with generator-based composition
+---
+
+Welcome to **better-result** — a modern, type-safe approach to error handling in TypeScript. Say goodbye to try/catch blocks and hello to functional, composable error handling with the Result type.
+
+## What is better-result?
+
+better-result provides a `Result<T, E>` type that represents either success (`Ok`) or failure (`Err`). Instead of throwing exceptions, functions return Results that you can chain, transform, and compose using a clean, functional API.
+
+```typescript
+import { Result } from "better-result";
+
+// Wrap throwing functions
+const parsed = Result.try(() => JSON.parse(input));
+
+// Check and use
+if (Result.isOk(parsed)) {
+  console.log(parsed.value);
+} else {
+  console.error(parsed.error);
+}
+
+// Or use pattern matching
+const message = parsed.match({
+  ok: (data) => `Got: ${data.name}`,
+  err: (e) => `Failed: ${e.message}`,
+});
+```
+
+## Why use Result types?
+
+<CardGroup cols={2}>
+  <Card title="Type-Safe Errors" icon="shield-check">
+    Errors are part of your function's type signature, making error handling explicit and impossible to forget.
+  </Card>
+  <Card title="Generator Composition" icon="code">
+    Use `yield*` syntax to chain multiple Results without nested callbacks or complex control flow.
+  </Card>
+  <Card title="Tagged Errors" icon="tag">
+    Create discriminated error unions with the `TaggedError` factory for exhaustive pattern matching.
+  </Card>
+  <Card title="Zero Dependencies" icon="feather">
+    Lightweight and minimal — only 830 lines of core code with no runtime dependencies.
+  </Card>
+</CardGroup>
+
+## Quick Navigation
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Get started with npm, yarn, pnpm, or bun
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first Result-based application
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/api/result">
+    Learn the fundamentals of Result types
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/result">
+    Explore the complete API
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Generator-Based Composition
+
+Chain multiple Results using generator syntax — no nested callbacks or complex error handling logic:
+
+```typescript
+const result = Result.gen(function* () {
+  const a = yield* parseNumber(inputA); // Unwraps or short-circuits
+  const b = yield* parseNumber(inputB);
+  const c = yield* divide(a, b);
+  return Result.ok(c);
+});
+// Result<number, ParseError | DivisionError>
+```
+
+### Tagged Errors for Type Safety
+
+Create discriminated error unions for exhaustive pattern matching:
+
+```typescript
+import { TaggedError, matchError } from "better-result";
+
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+type AppError = NotFoundError | ValidationError;
+
+// Exhaustive matching — TypeScript ensures all cases are handled
+matchError(error, {
+  NotFoundError: (e) => `Missing: ${e.id}`,
+  ValidationError: (e) => `Bad field: ${e.field}`,
+});
+```
+
+### Async Operations with Retry
+
+Wrap promises and add retry logic with exponential backoff:
+
+```typescript
+const result = await Result.tryPromise(() => fetch(url), {
+  retry: {
+    times: 3,
+    delayMs: 100,
+    backoff: "exponential", // or "linear" | "constant"
+  },
+});
+```
+
+### Serialization for RPC
+
+Convert Results to plain objects for server actions, RPC, or storage:
+
+```typescript
+// Server action
+async function createUser(data: FormData): Promise<SerializedResult<User, ValidationError>> {
+  const result = await validateAndCreate(data);
+  return Result.serialize(result);
+}
+
+// Client-side
+const serialized = await createUser(formData);
+const result = Result.deserialize<User, ValidationError>(serialized);
+```
+
+## Philosophy
+
+better-result follows these principles:
+
+1. **Errors are values** — Not exceptions to be thrown and caught, but first-class values to be transformed and composed
+2. **Type safety first** — Error types are part of your function signatures, making error handling explicit
+3. **Functional composition** — Chain operations declaratively without complex control flow
+4. **Zero magic** — Simple, transparent implementation with no hidden behavior
+
+## Next Steps
+
+<Steps>
+  <Step title="Install the package">
+    Follow the [installation guide](/installation) to add better-result to your project
+  </Step>
+  <Step title="Try the quickstart">
+    Build a working example with the [quickstart tutorial](/quickstart)
+  </Step>
+  <Step title="Learn the concepts">
+    Dive deeper into [Result types](/api/result) and [error handling](/core/error-handling)
+  </Step>
+  <Step title="Explore the API">
+    Browse the complete [API reference](/api/result)
+  </Step>
+</Steps>

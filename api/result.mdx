@@ -1,0 +1,176 @@
+---
+title: "Result<T, E>"
+description: "The core Result type - a discriminated union for type-safe error handling"
+---
+
+## Overview
+
+`Result<T, E>` is a discriminated union type representing the outcome of an operation that can either succeed with a value of type `T` or fail with an error of type `E`.
+
+```typescript
+type Result<T, E> = Ok<T, E> | Err<T, E>
+```
+
+## Type Structure
+
+The Result type is a union of two variants:
+
+- **`Ok<T, E>`** - Represents success with a value of type `T`
+- **`Err<T, E>`** - Represents failure with an error of type `E`
+
+Both variants use **phantom types** to enable proper type inference in composition:
+
+- `Ok<T, E>`: `T` is the actual value type, `E` is a phantom (unused at runtime)
+- `Err<T, E>`: `T` is a phantom (unused at runtime), `E` is the actual error type
+
+This symmetric structure is essential for generator-based composition with `Result.gen()`.
+
+## The Ok Variant
+
+```typescript
+class Ok<A, E = never> {
+  readonly status: "ok";
+  readonly value: A;
+}
+```
+
+### Properties
+
+<ResponseField name="status" type='"ok"' required>
+  Discriminant property that identifies this as a success result
+</ResponseField>
+
+<ResponseField name="value" type="A" required>
+  The success value
+</ResponseField>
+
+## The Err Variant
+
+```typescript
+class Err<T, E> {
+  readonly status: "error";
+  readonly error: E;
+}
+```
+
+### Properties
+
+<ResponseField name="status" type='"error"' required>
+  Discriminant property that identifies this as an error result
+</ResponseField>
+
+<ResponseField name="error" type="E" required>
+  The error value
+</ResponseField>
+
+## Type Utilities
+
+### InferOk
+
+Extracts the success type from a Result:
+
+```typescript
+type InferOk<R> = R extends Ok<infer T, unknown> ? T : never
+```
+
+**Example:**
+```typescript
+type MyResult = Result<number, string>;
+type Value = InferOk<MyResult>; // number
+```
+
+### InferErr
+
+Extracts the error type from a Result:
+
+```typescript
+type InferErr<R> = R extends Err<unknown, infer E> ? E : never
+```
+
+**Example:**
+```typescript
+type MyResult = Result<number, string>;
+type Error = InferErr<MyResult>; // string
+```
+
+## Discriminated Union Pattern
+
+The Result type uses TypeScript's discriminated union feature via the `status` property:
+
+```typescript
+const result: Result<number, string> = getValue();
+
+if (result.status === "ok") {
+  // TypeScript narrows to Ok<number, string>
+  console.log(result.value); // number
+} else {
+  // TypeScript narrows to Err<number, string>
+  console.log(result.error); // string
+}
+```
+
+## Examples
+
+### Basic Usage
+
+```typescript
+import { Result } from "better-result";
+
+// Success case
+const success: Result<number, string> = Result.ok(42);
+
+// Error case
+const failure: Result<number, string> = Result.err("Something went wrong");
+```
+
+### With Custom Error Types
+
+```typescript
+class ValidationError extends TaggedError<"ValidationError"> {
+  readonly _tag = "ValidationError";
+  constructor(public field: string, public message: string) {
+    super();
+  }
+}
+
+type ValidateResult = Result<User, ValidationError>;
+
+function validateUser(data: unknown): ValidateResult {
+  if (!data || typeof data !== "object") {
+    return Result.err(new ValidationError("user", "Invalid data"));
+  }
+  return Result.ok(data as User);
+}
+```
+
+### Pattern Matching
+
+```typescript
+const result: Result<number, string> = performOperation();
+
+const output = result.match({
+  ok: (value) => `Success: ${value}`,
+  err: (error) => `Error: ${error}`,
+});
+```
+
+## Why Phantom Types?
+
+Phantom types ensure type safety in generator-based composition:
+
+```typescript
+const result = Result.gen(function* () {
+  const a = yield* getUserId();    // Ok<string, DbError>
+  const b = yield* getUser(a);     // Ok<User, ApiError>
+  return Result.ok({ a, b });
+});
+// result: Result<{a: string, b: User}, DbError | ApiError>
+```
+
+Without phantom types, TypeScript couldn't infer the union of all possible error types across multiple yields.
+
+## See Also
+
+- [Creating Results with ok() and err()](/api/ok-and-err)
+- [Instance Methods](/api/instance-methods)
+- [Static Methods](/api/static-methods)

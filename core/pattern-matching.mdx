@@ -1,0 +1,583 @@
+---
+title: Pattern Matching
+description: Handle success and error cases with Result.match(), type narrowing with isOk/isErr, and both data-first and pipeable APIs
+---
+
+## Overview
+
+Pattern matching in better-result allows you to handle both success and error cases in a type-safe way:
+
+- **Result.match()** - Exhaustive matching with ok/err handlers
+- **isOk() / isErr()** - Type guards for narrowing
+- **Data-first and data-last APIs** - Flexible composition styles
+
+## Result.match()
+
+Exhaustively handle both success and error cases by providing handlers for each variant.
+
+### Basic Usage
+
+```typescript
+const result: Result<number, string> = getNumber();
+
+const message = result.match({
+  ok: (value) => `Success: ${value}`,
+  err: (error) => `Error: ${error}`,
+});
+```
+
+### Type Signature
+
+```typescript
+// Method style (data-first)
+class Ok<A, E> {
+  match<T>(handlers: { ok: (a: A) => T; err: (e: never) => T }): T;
+}
+
+class Err<T, E> {
+  match<R>(handlers: { ok: (a: never) => R; err: (e: E) => R }): R;
+}
+
+// Function style (dual API)
+function match<A, E, T>(
+  result: Result<A, E>,
+  handlers: { ok: (a: A) => T; err: (e: E) => T }
+): T;
+
+function match<A, E, T>(
+  handlers: { ok: (a: A) => T; err: (e: E) => T }
+): (result: Result<A, E>) => T;
+```
+
+### Real-World Example
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  message: string;
+}>() {}
+
+type FetchError = NotFoundError | NetworkError;
+
+const displayUser = (result: Result<User, FetchError>) => {
+  return result.match({
+    ok: (user) => {
+      return (
+        <div>
+          <h1>{user.name}</h1>
+          <p>{user.email}</p>
+        </div>
+      );
+    },
+    err: (error) => {
+      // error is NotFoundError | NetworkError
+      return matchError(error, {
+        NotFoundError: (e) => <p>User {e.id} not found</p>,
+        NetworkError: (e) => <p>Network error: {e.url}</p>,
+      });
+    },
+  });
+};
+```
+
+## Data-First vs Data-Last
+
+better-result supports both API styles for maximum flexibility.
+
+### Data-First (Method Style)
+
+Call `match()` as a method on the Result instance:
+
+```typescript
+const result = fetchUser("123");
+
+const message = result.match({
+  ok: (user) => `Found: ${user.name}`,
+  err: (error) => `Error: ${error.message}`,
+});
+```
+
+<Tip>
+Data-first is more concise for one-off transformations.
+</Tip>
+
+### Data-Last (Pipeable Style)
+
+Pass handlers first, Result last - enables composition:
+
+```typescript
+const formatResult = Result.match<User, FetchError, string>({
+  ok: (user) => `Found: ${user.name}`,
+  err: (error) => `Error: ${error.message}`,
+});
+
+const message1 = formatResult(fetchUser("123"));
+const message2 = formatResult(fetchUser("456"));
+```
+
+<Tip>
+Data-last is useful for creating reusable transformations and pipelines.
+</Tip>
+
+### Pipeable Composition
+
+Combine multiple transformations:
+
+```typescript
+import { pipe } from "better-result";
+
+const processUser = pipe(
+  fetchUser("123"),
+  Result.map(user => user.name),
+  Result.map(name => name.toUpperCase()),
+  Result.match({
+    ok: (name) => `User: ${name}`,
+    err: (error) => `Failed: ${error.message}`,
+  })
+);
+```
+
+## Type Narrowing with isOk/isErr
+
+Use type guards to narrow the Result type before accessing properties.
+
+### isOk() Type Guard
+
+```typescript
+const result: Result<User, NotFoundError> = fetchUser(id);
+
+if (result.isOk()) {
+  // result is Ok<User, NotFoundError>
+  console.log(result.value.name);
+  console.log(result.status); // "ok"
+} else {
+  // result is Err<User, NotFoundError>
+  console.log(result.error.id);
+  console.log(result.status); // "error"
+}
+```
+
+### isErr() Type Guard
+
+```typescript
+const result: Result<User, NotFoundError> = fetchUser(id);
+
+if (result.isErr()) {
+  // result is Err<User, NotFoundError>
+  console.log(result.error.message);
+  console.log(result.error._tag); // "NotFoundError"
+  return;
+}
+
+// result is Ok<User, NotFoundError>
+console.log(result.value.name);
+```
+
+### Negation Type Narrowing
+
+Negated guards also narrow the type:
+
+```typescript
+const result: Result<number, string> = compute();
+
+if (!result.isOk()) {
+  // result is Err<number, string>
+  console.log(result.error);
+  return;
+}
+
+// result is Ok<number, string>
+console.log(result.value * 2);
+```
+
+## Static Type Guards
+
+Use static functions from the Result namespace:
+
+### Result.isOk()
+
+```typescript
+import { Result } from "better-result";
+
+const result = fetchUser(id);
+
+if (Result.isOk(result)) {
+  console.log(result.value.name);
+}
+```
+
+### Result.isError()
+
+```typescript
+import { Result } from "better-result";
+
+const result = fetchUser(id);
+
+if (Result.isError(result)) {
+  console.log(result.error.message);
+}
+```
+
+<Note>
+`Result.isError()` (with an "r") matches the Err `status` field which is `"error"` (also with an "r").
+</Note>
+
+## Exhaustive Matching Patterns
+
+### Converting to HTTP Response
+
+```typescript
+type ApiError = NotFoundError | ValidationError | InternalError;
+
+const toHttpResponse = (
+  result: Result<Data, ApiError>
+): HttpResponse => {
+  return result.match({
+    ok: (data) => ({
+      status: 200,
+      body: JSON.stringify(data),
+    }),
+    err: (error) => matchError(error, {
+      NotFoundError: (e) => ({
+        status: 404,
+        body: JSON.stringify({ error: e.message }),
+      }),
+      ValidationError: (e) => ({
+        status: 400,
+        body: JSON.stringify({ field: e.field, error: e.message }),
+      }),
+      InternalError: (e) => ({
+        status: 500,
+        body: JSON.stringify({ error: "Internal server error" }),
+      }),
+    }),
+  });
+};
+```
+
+### Async Operations
+
+```typescript
+const processUser = async (id: string) => {
+  const result = await fetchUser(id);
+
+  return result.match({
+    ok: async (user) => {
+      await sendWelcomeEmail(user.email);
+      await logUserActivity(user.id);
+      return `Processed: ${user.name}`;
+    },
+    err: async (error) => {
+      await logError(error);
+      return `Failed: ${error.message}`;
+    },
+  });
+};
+```
+
+### Early Return Pattern
+
+```typescript
+const updateUser = (id: string, data: UserData): Result<User, AppError> => {
+  const userResult = fetchUser(id);
+
+  if (userResult.isErr()) {
+    return userResult; // Early return with error
+  }
+
+  const user = userResult.value;
+
+  const validationResult = validateUserData(data);
+
+  if (validationResult.isErr()) {
+    return validationResult; // Early return with validation error
+  }
+
+  return saveUser({ ...user, ...data });
+};
+```
+
+<Info>
+The early return pattern works well for imperative code. For functional composition, use `andThen()` or `Result.gen()` instead.
+</Info>
+
+## Combining Pattern Matching
+
+### Nested Results
+
+```typescript
+const processOrder = (
+  orderId: string
+): Result<string, FetchError | ValidationError | PaymentError> => {
+  return fetchOrder(orderId).match({
+    ok: (order) => {
+      return validateOrder(order).match({
+        ok: (validOrder) => {
+          return processPayment(validOrder).match({
+            ok: (payment) => Result.ok(`Processed: ${payment.id}`),
+            err: (error) => Result.err(error),
+          });
+        },
+        err: (error) => Result.err(error),
+      });
+    },
+    err: (error) => Result.err(error),
+  });
+};
+```
+
+<Warning>
+Nested `match()` calls can become verbose. Consider using `andThen()` or `Result.gen()` for cleaner composition.
+</Warning>
+
+### Flattened with andThen
+
+Same logic, cleaner:
+
+```typescript
+const processOrder = (
+  orderId: string
+): Result<string, FetchError | ValidationError | PaymentError> => {
+  return fetchOrder(orderId)
+    .andThen(order => validateOrder(order))
+    .andThen(validOrder => processPayment(validOrder))
+    .map(payment => `Processed: ${payment.id}`);
+};
+```
+
+## Error Handler Patterns
+
+### Logging Errors
+
+```typescript
+const logAndReturn = <T, E>(
+  result: Result<T, E>,
+  logger: Logger
+): Result<T, E> => {
+  return result.match({
+    ok: (value) => {
+      logger.info("Operation succeeded", { value });
+      return Result.ok(value);
+    },
+    err: (error) => {
+      logger.error("Operation failed", { error });
+      return Result.err(error);
+    },
+  });
+};
+```
+
+### Converting Errors to Metrics
+
+```typescript
+const trackResult = <T, E extends { _tag: string }>(
+  result: Result<T, E>,
+  metrics: Metrics
+): Result<T, E> => {
+  return result.match({
+    ok: (value) => {
+      metrics.increment("operation.success");
+      return Result.ok(value);
+    },
+    err: (error) => {
+      metrics.increment(`operation.error.${error._tag}`);
+      return Result.err(error);
+    },
+  });
+};
+```
+
+### Fallback Values
+
+```typescript
+const withFallback = <T>(
+  result: Result<T, unknown>,
+  fallback: T
+): T => {
+  return result.match({
+    ok: (value) => value,
+    err: () => fallback,
+  });
+};
+
+// Or use unwrapOr:
+const value = result.unwrapOr(fallback);
+```
+
+## Type Inference
+
+TypeScript infers return types from your handlers:
+
+```typescript
+const result: Result<number, string> = getNumber();
+
+// Inferred type: string
+const message = result.match({
+  ok: (n) => `Got ${n}`,
+  err: (e) => `Error: ${e}`,
+});
+
+// Inferred type: number
+const value = result.match({
+  ok: (n) => n * 2,
+  err: () => 0,
+});
+
+// Inferred type: { status: string; value?: number }
+const obj = result.match({
+  ok: (n) => ({ status: "ok", value: n }),
+  err: () => ({ status: "error" }),
+});
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use match() for branching logic">
+    When you need different logic for success vs error:
+    
+    ```typescript
+    result.match({
+      ok: (user) => redirectToProfile(user),
+      err: (error) => showErrorPage(error),
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Use isOk/isErr for early returns">
+    When you want to handle errors first:
+    
+    ```typescript
+    if (result.isErr()) {
+      log.error(result.error);
+      return;
+    }
+    
+    // Continue with result.value
+    ```
+  </Accordion>
+  
+  <Accordion title="Use unwrapOr for simple fallbacks">
+    When you just need a default value:
+    
+    ```typescript
+    const count = getCount().unwrapOr(0);
+    ```
+  </Accordion>
+  
+  <Accordion title="Prefer andThen over nested match">
+    For sequential operations:
+    
+    ```typescript
+    // Good
+    fetchUser(id)
+      .andThen(user => validateUser(user))
+      .andThen(user => saveUser(user));
+    
+    // Avoid - too nested
+    fetchUser(id).match({
+      ok: (user) => validateUser(user).match({ ... }),
+      err: (e) => Result.err(e),
+    });
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Real-World Example
+
+Complete user registration flow:
+
+```typescript
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+class DuplicateError extends TaggedError("DuplicateError")<{
+  email: string;
+  message: string;
+}>() {}
+
+class DatabaseError extends TaggedError("DatabaseError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+type RegistrationError = ValidationError | DuplicateError | DatabaseError;
+
+const registerUser = async (
+  input: RegistrationInput
+): Promise<Result<User, RegistrationError>> => {
+  // Validate input
+  const validationResult = validateInput(input);
+  if (validationResult.isErr()) {
+    return validationResult;
+  }
+
+  // Check for duplicates
+  const existingUser = await findUserByEmail(input.email);
+  if (existingUser.isOk()) {
+    return Result.err(new DuplicateError({
+      email: input.email,
+      message: "Email already registered",
+    }));
+  }
+
+  // Create user
+  const createResult = await createUser(validationResult.value);
+  
+  return createResult.match({
+    ok: (user) => {
+      logger.info("User registered", { userId: user.id });
+      metrics.increment("user.registered");
+      return Result.ok(user);
+    },
+    err: (error) => {
+      logger.error("Registration failed", { error });
+      metrics.increment(`user.registration.error.${error._tag}`);
+      return Result.err(error);
+    },
+  });
+};
+
+// Usage
+const result = await registerUser(input);
+
+const response = result.match({
+  ok: (user) => ({
+    status: 201,
+    body: { id: user.id, email: user.email },
+  }),
+  err: (error) => matchError(error, {
+    ValidationError: (e) => ({
+      status: 400,
+      body: { field: e.field, error: e.message },
+    }),
+    DuplicateError: (e) => ({
+      status: 409,
+      body: { error: "Email already exists" },
+    }),
+    DatabaseError: (e) => ({
+      status: 500,
+      body: { error: "Internal server error" },
+    }),
+  }),
+});
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Generator Composition" icon="layer-group" href="/core/generator-composition">
+    Learn Result.gen() for imperative-style error handling
+  </Card>
+  
+  <Card title="Error Handling" icon="triangle-exclamation" href="/core/error-handling">
+    Master TaggedError and exhaustive error matching
+  </Card>
+</CardGroup>

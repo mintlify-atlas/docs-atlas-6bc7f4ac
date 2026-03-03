@@ -1,0 +1,257 @@
+---
+title: "ok() and err()"
+description: "Factory functions for creating Ok and Err results"
+---
+
+## Result.ok()
+
+Creates a successful result containing a value.
+
+### Signatures
+
+```typescript
+function ok(): Ok<void, never>
+function ok<A, E = never>(value: A): Ok<A, E>
+```
+
+### Parameters
+
+<ParamField path="value" type="A" optional>
+  The success value to wrap. If omitted, creates `Ok<void, never>` for side-effectful operations.
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="Ok<A, E>">
+  An Ok instance containing the value
+</ResponseField>
+
+### Examples
+
+#### With a Value
+
+```typescript
+import { Result } from "better-result";
+
+const result = Result.ok(42);
+// Result: Ok<number, never>
+
+console.log(result.status); // "ok"
+console.log(result.value);  // 42
+```
+
+#### Without a Value (void)
+
+```typescript
+const result = Result.ok();
+// Result: Ok<void, never>
+
+// Useful for side-effectful operations that don't return a value
+function logMessage(msg: string): Result<void, IoError> {
+  console.log(msg);
+  return Result.ok();
+}
+```
+
+#### With Explicit Error Type
+
+```typescript
+type AppError = "NetworkError" | "ValidationError";
+
+const result = Result.ok<number, AppError>(42);
+// Result: Ok<number, AppError>
+```
+
+## Result.err()
+
+Creates an error result containing an error value.
+
+### Signature
+
+```typescript
+function err<T = never, E = unknown>(error: E): Err<T, E>
+```
+
+### Parameters
+
+<ParamField path="error" type="E" required>
+  The error value to wrap
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="Err<T, E>">
+  An Err instance containing the error
+</ResponseField>
+
+### Examples
+
+#### With a String Error
+
+```typescript
+import { Result } from "better-result";
+
+const result = Result.err("Something went wrong");
+// Result: Err<never, string>
+
+console.log(result.status); // "error"
+console.log(result.error);  // "Something went wrong"
+```
+
+#### With a Custom Error Class
+
+```typescript
+import { TaggedError } from "better-result";
+
+class ValidationError extends TaggedError<"ValidationError"> {
+  readonly _tag = "ValidationError";
+  constructor(
+    public field: string,
+    public message: string
+  ) {
+    super();
+  }
+}
+
+const result = Result.err(new ValidationError("email", "Invalid format"));
+// Result: Err<never, ValidationError>
+```
+
+#### With Explicit Success Type
+
+```typescript
+interface User {
+  id: string;
+  name: string;
+}
+
+const result = Result.err<User, string>("User not found");
+// Result: Err<User, string>
+```
+
+## Understanding Phantom Types
+
+Both `ok()` and `err()` support phantom type parameters:
+
+```typescript
+// Ok<A, E> - A is real, E is phantom
+const success = Result.ok<number, string>(42);
+
+// Err<T, E> - T is phantom, E is real
+const failure = Result.err<number, string>("error");
+```
+
+Phantom types exist only at compile time for type inference and are erased at runtime. They enable:
+
+1. **Type unification** in Result unions
+2. **Proper inference** in `Result.gen()` composition
+3. **Type safety** across multiple operations
+
+### Example: Why Phantom Types Matter
+
+```typescript
+function divide(a: number, b: number): Result<number, string> {
+  if (b === 0) {
+    // Err needs phantom type <number> to match function return type
+    return Result.err<number, string>("Division by zero");
+  }
+  return Result.ok<number, string>(a / b);
+}
+```
+
+Without the phantom types, TypeScript couldn't verify that both branches return the same `Result<number, string>` type.
+
+## Type Guards
+
+### Result.isOk()
+
+Type guard to check if a result is Ok.
+
+```typescript
+const result: Result<number, string> = getValue();
+
+if (Result.isOk(result)) {
+  // TypeScript narrows to Ok<number, string>
+  console.log(result.value); // number
+}
+```
+
+### Result.isError()
+
+Type guard to check if a result is Err.
+
+```typescript
+const result: Result<number, string> = getValue();
+
+if (Result.isError(result)) {
+  // TypeScript narrows to Err<number, string>
+  console.log(result.error); // string
+}
+```
+
+## Common Patterns
+
+### Conditional Creation
+
+```typescript
+function parseAge(input: string): Result<number, string> {
+  const age = parseInt(input, 10);
+  
+  if (isNaN(age)) {
+    return Result.err("Invalid number");
+  }
+  
+  if (age < 0 || age > 150) {
+    return Result.err("Age out of range");
+  }
+  
+  return Result.ok(age);
+}
+```
+
+### Early Returns
+
+```typescript
+function validateUser(data: unknown): Result<User, ValidationError> {
+  if (!data || typeof data !== "object") {
+    return Result.err(new ValidationError("Invalid data"));
+  }
+  
+  if (!('id' in data) || typeof data.id !== "string") {
+    return Result.err(new ValidationError("Missing or invalid id"));
+  }
+  
+  return Result.ok(data as User);
+}
+```
+
+### With Discriminated Unions
+
+```typescript
+type AppError = 
+  | { _tag: "NetworkError"; statusCode: number }
+  | { _tag: "ValidationError"; field: string }
+  | { _tag: "NotFoundError"; id: string };
+
+function handleError(error: AppError): string {
+  switch (error._tag) {
+    case "NetworkError":
+      return `HTTP ${error.statusCode}`;
+    case "ValidationError":
+      return `Invalid ${error.field}`;
+    case "NotFoundError":
+      return `Not found: ${error.id}`;
+  }
+}
+
+const result = Result.err<User, AppError>({
+  _tag: "NotFoundError",
+  id: "user-123"
+});
+```
+
+## See Also
+
+- [Result Type Overview](/api/result)
+- [Instance Methods](/api/instance-methods)
+- [Static Methods](/api/static-methods)

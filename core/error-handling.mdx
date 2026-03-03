@@ -1,0 +1,614 @@
+---
+title: Error Handling
+description: Master TaggedError, exhaustive error matching, and panic vs recoverable errors
+---
+
+## Overview
+
+better-result provides robust error handling through:
+- **TaggedError** - Factory for creating discriminated error classes
+- **Exhaustive matching** - Type-safe error handling with `matchError()`
+- **UnhandledException** - Wrapper for unexpected exceptions
+- **Panic** - Unrecoverable errors (defects in user code)
+
+## TaggedError Factory
+
+### Creating Tagged Errors
+
+`TaggedError` is a factory function that creates error classes with a `_tag` discriminator for exhaustive type checking.
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+const error = new NotFoundError({ 
+  id: "user-123", 
+  message: "User not found" 
+});
+
+console.log(error._tag);    // "NotFoundError"
+console.log(error.name);    // "NotFoundError"
+console.log(error.message); // "User not found"
+console.log(error.id);      // "user-123"
+```
+
+### Why TaggedError?
+
+TaggedError provides several benefits over plain Error objects:
+
+<AccordionGroup>
+  <Accordion title="Type-safe discrimination">
+    The `_tag` property enables exhaustive pattern matching:
+    
+    ```typescript
+    type AppError = NotFoundError | ValidationError;
+    
+    const handleError = (error: AppError) => {
+      matchError(error, {
+        NotFoundError: (e) => `Missing: ${e.id}`,
+        ValidationError: (e) => `Invalid: ${e.field}`,
+      });
+    };
+    ```
+    
+    TypeScript enforces that all error variants are handled.
+  </Accordion>
+  
+  <Accordion title="Structured error data">
+    Store domain-specific information:
+    
+    ```typescript
+    class ApiError extends TaggedError("ApiError")<{
+      status: number;
+      endpoint: string;
+      message: string;
+      retryable: boolean;
+    }>() {}
+    
+    const error = new ApiError({
+      status: 429,
+      endpoint: "/api/users",
+      message: "Rate limit exceeded",
+      retryable: true,
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Cause chaining">
+    TaggedError automatically chains Error causes in stack traces:
+    
+    ```typescript
+    class WrapperError extends TaggedError("WrapperError")<{
+      message: string;
+      cause: unknown;
+    }>() {}
+    
+    const inner = new Error("root cause");
+    const outer = new WrapperError({ 
+      message: "wrapper", 
+      cause: inner 
+    });
+    
+    console.log(outer.stack);
+    // WrapperError: wrapper
+    //   at ...
+    // Caused by:
+    //   Error: root cause
+    //     at ...
+    ```
+  </Accordion>
+  
+  <Accordion title="JSON serialization">
+    TaggedError instances serialize cleanly:
+    
+    ```typescript
+    const error = new NotFoundError({ 
+      id: "123", 
+      message: "Not found" 
+    });
+    
+    JSON.stringify(error.toJSON());
+    // {
+    //   "_tag": "NotFoundError",
+    //   "id": "123",
+    //   "message": "Not found",
+    //   "name": "NotFoundError",
+    //   "stack": "..."
+    // }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Type Signature
+
+```typescript
+function TaggedError<Tag extends string>(
+  tag: Tag
+): <Props extends Record<string, unknown> = {}>() => 
+  TaggedErrorClass<Tag, Props>;
+
+type TaggedErrorInstance<Tag extends string, Props> = Error & {
+  readonly _tag: Tag;
+  toJSON(): object;
+} & Readonly<Props>;
+
+type TaggedErrorClass<Tag extends string, Props> = {
+  new (
+    ...args: keyof Props extends never ? [args?: {}] : [args: Props]
+  ): TaggedErrorInstance<Tag, Props>;
+  
+  is(value: unknown): value is TaggedErrorInstance<Tag, Props>;
+};
+```
+
+## Exhaustive Error Matching
+
+### matchError()
+
+Exhaustively pattern match on a union of tagged errors. TypeScript enforces that all variants are handled.
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  message: string;
+}>() {}
+
+type AppError = NotFoundError | ValidationError | NetworkError;
+
+const formatError = (error: AppError): string => {
+  return matchError(error, {
+    NotFoundError: (e) => `Missing: ${e.id}`,
+    ValidationError: (e) => `Invalid field '${e.field}': ${e.message}`,
+    NetworkError: (e) => `Network error at ${e.url}`,
+  });
+};
+```
+
+<Note>
+If you remove a handler, TypeScript will produce a compile error. This ensures all error cases are handled.
+</Note>
+
+#### Data-Last (Pipeable) API
+
+```typescript
+const formatError = matchError<AppError, string>({
+  NotFoundError: (e) => `Missing: ${e.id}`,
+  ValidationError: (e) => `Invalid: ${e.field}`,
+  NetworkError: (e) => `Network error at ${e.url}`,
+});
+
+const result = formatError(error);
+```
+
+### matchErrorPartial()
+
+Partial pattern match with a fallback for unhandled errors.
+
+```typescript
+const formatError = (error: AppError): string => {
+  return matchErrorPartial(
+    error,
+    {
+      NotFoundError: (e) => `Missing: ${e.id}`,
+    },
+    (e) => {
+      // e is ValidationError | NetworkError (NotFoundError excluded)
+      return `Other error: ${e._tag}`;
+    }
+  );
+};
+```
+
+#### Type Narrowing in Fallback
+
+The fallback parameter is typed as `Exclude<E, HandledErrors>`, providing type safety:
+
+```typescript
+const handle = (error: AppError) => {
+  return matchErrorPartial(
+    error,
+    {
+      NotFoundError: (e) => `not found: ${e.id}`,
+      NetworkError: (e) => `network: ${e.url}`,
+    },
+    (e) => {
+      // e is ValidationError only (other two excluded)
+      const check: ValidationError = e;
+      return `validation: ${check.field}`;
+    }
+  );
+};
+```
+
+## Error Recovery Patterns
+
+### Mapping Errors to Default Values
+
+```typescript
+const getUser = (id: string): Result<User, NotFoundError> => {
+  // ...
+};
+
+const getUserOrGuest = (id: string): User => {
+  return getUser(id).unwrapOr(GUEST_USER);
+};
+```
+
+### Converting Errors to Success
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+const getOptionalUser = (
+  id: string
+): Result<User | null, OtherError> => {
+  return getUser(id)
+    .match({
+      ok: (user) => Result.ok(user),
+      err: (e) => {
+        if (NotFoundError.is(e)) {
+          return Result.ok(null);
+        }
+        return Result.err(e);
+      },
+    });
+};
+```
+
+### Retrying on Specific Errors
+
+```typescript
+class RateLimitError extends TaggedError("RateLimitError")<{
+  retryAfter: number;
+  message: string;
+}>() {}
+
+class FatalError extends TaggedError("FatalError")<{
+  message: string;
+}>() {}
+
+type ApiError = RateLimitError | FatalError;
+
+const callApi = async (url: string) => {
+  return Result.tryPromise(
+    {
+      try: async () => {
+        const res = await fetch(url);
+        if (res.status === 429) {
+          throw new RateLimitError({
+            retryAfter: 1000,
+            message: "Rate limited",
+          });
+        }
+        if (!res.ok) {
+          throw new FatalError({ message: `HTTP ${res.status}` });
+        }
+        return res.json();
+      },
+      catch: (e) => e as ApiError,
+    },
+    {
+      retry: {
+        times: 3,
+        delayMs: 1000,
+        backoff: "constant",
+        shouldRetry: (e) => e._tag === "RateLimitError",
+      },
+    }
+  );
+};
+```
+
+## UnhandledException
+
+`UnhandledException` wraps exceptions caught by `Result.try()` and `Result.tryPromise()` when no custom `catch` handler is provided.
+
+```typescript
+const result = Result.try(() => JSON.parse("invalid"));
+// Result<unknown, UnhandledException>
+
+if (Result.isError(result)) {
+  console.log(result.error._tag); // "UnhandledException"
+  console.log(result.error.message); // "Unhandled exception: ..."
+  console.log(result.error.cause); // SyntaxError
+}
+```
+
+### When to Use UnhandledException
+
+<Tabs>
+  <Tab title="Use UnhandledException">
+    When you want quick error wrapping without defining custom error types:
+    
+    ```typescript
+    const parseJSON = (str: string): Result<unknown, UnhandledException> => {
+      return Result.try(() => JSON.parse(str));
+    };
+    ```
+  </Tab>
+  
+  <Tab title="Use Custom Errors">
+    For production code with domain-specific error handling:
+    
+    ```typescript
+    class ParseError extends TaggedError("ParseError")<{
+      input: string;
+      message: string;
+      cause: unknown;
+    }>() {}
+    
+    const parseJSON = (str: string): Result<unknown, ParseError> => {
+      return Result.try({
+        try: () => JSON.parse(str),
+        catch: (cause) => new ParseError({
+          input: str.slice(0, 100),
+          message: "Failed to parse JSON",
+          cause,
+        }),
+      });
+    };
+    ```
+  </Tab>
+</Tabs>
+
+## Panic: Unrecoverable Errors
+
+`Panic` represents **defects in user code** - situations where recovery is impossible:
+
+- Callback throws inside `map()`, `andThen()`, `match()`, etc.
+- `catch` handler throws in `Result.try()` or `Result.tryPromise()`
+- `finally` block throws in `Result.gen()`
+- Generator body throws before yielding
+- `Symbol.dispose` or `Symbol.asyncDispose` throws
+
+### Why Panic?
+
+Unlike recoverable errors (wrapped in `Err`), Panics indicate **programming errors** that shouldn't be caught and handled - they should be fixed.
+
+```typescript
+// This is a defect - map callback should never throw
+try {
+  Result.ok(1).map(() => {
+    throw new Error("oops");
+  });
+} catch (e) {
+  console.log(e instanceof Panic); // true
+  console.log(e.message); // "map callback threw"
+  console.log(e.cause); // Error("oops")
+}
+```
+
+### Panic in Generators
+
+```typescript
+try {
+  Result.gen(function* () {
+    try {
+      yield* Result.err("expected error");
+      return Result.ok(1);
+    } finally {
+      // Cleanup throws - this is a Panic
+      throw new Error("cleanup failed");
+    }
+  });
+} catch (e) {
+  console.log(e instanceof Panic); // true
+  console.log(e.message); // "generator cleanup threw"
+}
+```
+
+<Warning>
+Panics should **never** be caught and ignored. They indicate bugs in your code that need to be fixed.
+</Warning>
+
+### Avoiding Panics
+
+<CodeGroup>
+```typescript Don't Throw in Combinators
+// Bad: throws Panic
+Result.ok(x).map(value => {
+  if (invalid(value)) throw new Error("bad");
+  return transform(value);
+});
+
+// Good: return Result from andThen
+Result.ok(x).andThen(value => {
+  if (invalid(value)) return Result.err(new ValidationError({ ... }));
+  return Result.ok(transform(value));
+});
+```
+
+```typescript Don't Throw in Catch Handlers
+// Bad: catch handler throws
+Result.try({
+  try: () => riskyOperation(),
+  catch: (e) => {
+    throw new Error("handler failed"); // Panic!
+  },
+});
+
+// Good: catch handler returns error
+Result.try({
+  try: () => riskyOperation(),
+  catch: (e) => new MyError({ cause: e }),
+});
+```
+
+```typescript Don't Throw in Cleanup
+// Bad: finally throws
+Result.gen(function* () {
+  try {
+    yield* operation();
+  } finally {
+    throw new Error("cleanup failed"); // Panic!
+  }
+});
+
+// Good: cleanup doesn't throw
+Result.gen(function* () {
+  try {
+    yield* operation();
+  } finally {
+    await cleanup().catch(console.error);
+  }
+});
+```
+</CodeGroup>
+
+## Type Guards
+
+### TaggedError.is()
+
+Every TaggedError class has a static `is()` type guard:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+const error: unknown = getError();
+
+if (NotFoundError.is(error)) {
+  // error is NotFoundError
+  console.log(error.id);
+  console.log(error._tag); // "NotFoundError"
+}
+```
+
+### isTaggedError()
+
+Check if a value is any TaggedError instance:
+
+```typescript
+import { isTaggedError } from "better-result";
+
+if (isTaggedError(error)) {
+  // error is Error & { _tag: string }
+  console.log(error._tag);
+}
+```
+
+### isPanic()
+
+Check if a value is a Panic:
+
+```typescript
+import { isPanic } from "better-result";
+
+try {
+  riskyOperation();
+} catch (e) {
+  if (isPanic(e)) {
+    // Defect in user code - log and crash
+    logger.fatal("Panic occurred", { error: e });
+    process.exit(1);
+  }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use TaggedError for domain errors">
+    Create discriminated error unions for your domain:
+    
+    ```typescript
+    class NotFoundError extends TaggedError("NotFoundError")<{
+      resource: string;
+      id: string;
+      message: string;
+    }>() {}
+    
+    class PermissionError extends TaggedError("PermissionError")<{
+      userId: string;
+      action: string;
+      message: string;
+    }>() {}
+    
+    type DomainError = NotFoundError | PermissionError;
+    ```
+  </Accordion>
+  
+  <Accordion title="Use exhaustive matching">
+    Prefer `matchError()` over if-else chains:
+    
+    ```typescript
+    // Good: exhaustive, type-safe
+    matchError(error, {
+      NotFoundError: (e) => handle404(e),
+      PermissionError: (e) => handle403(e),
+    });
+    
+    // Avoid: easy to miss cases
+    if (error._tag === "NotFoundError") {
+      // ...
+    } else if (error._tag === "PermissionError") {
+      // ...
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Don't catch Panics">
+    Let Panics crash the application - they indicate bugs:
+    
+    ```typescript
+    // Bad: hiding defects
+    try {
+      Result.ok(x).map(buggyTransform);
+    } catch (e) {
+      return Result.err(e); // Don't do this!
+    }
+    
+    // Good: fix the bug in buggyTransform
+    Result.ok(x).map(fixedTransform);
+    ```
+  </Accordion>
+  
+  <Accordion title="Include context in errors">
+    Store enough information to debug issues:
+    
+    ```typescript
+    class ApiError extends TaggedError("ApiError")<{
+      endpoint: string;
+      method: string;
+      status: number;
+      body: unknown;
+      message: string;
+      cause: unknown;
+    }>() {}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pattern Matching" icon="code-branch" href="/core/pattern-matching">
+    Learn how to handle Results with match() and type narrowing
+  </Card>
+  
+  <Card title="Generator Composition" icon="layer-group" href="/core/generator-composition">
+    Master Result.gen() for imperative-style error handling
+  </Card>
+</CardGroup>

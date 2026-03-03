@@ -1,0 +1,269 @@
+---
+title: Type Utilities
+description: TypeScript type utilities for extracting and inferring Result types
+icon: wrench
+---
+
+## Overview
+
+better-result provides type utilities to extract success and error types from `Result` instances. These utilities are essential when working with complex Result types or building generic functions.
+
+## InferOk
+
+Extracts the success value type from a Result type.
+
+<ParamField path="R" type="Result<T, E>" required>
+  The Result type to extract from
+</ParamField>
+
+<ResponseField name="Return Type" type="T">
+  The success value type T from Result\<T, E\>
+</ResponseField>
+
+### Type Definition
+
+```typescript
+type InferOk<R> = R extends Ok<infer T, unknown> ? T : never;
+```
+
+### How It Works
+
+`InferOk` uses a distributive conditional type to extract the success type:
+- For `Ok<A, X> | Ok<B, Y>`, returns `A | B`
+- For `Result<number, Error>`, returns `number`
+- For non-Result types, returns `never`
+
+### Usage Examples
+
+<CodeGroup>
+```typescript Basic Usage
+import { Result, InferOk } from "better-result";
+
+type UserResult = Result<{ id: string; name: string }, Error>;
+type User = InferOk<UserResult>;
+// User = { id: string; name: string }
+```
+
+```typescript Union Types
+import { Result, Ok, InferOk } from "better-result";
+
+// Multiple Result types
+type Results = Ok<number, Error> | Ok<string, Error>;
+type Values = InferOk<Results>;
+// Values = number | string
+```
+
+```typescript Generic Functions
+import { Result, InferOk } from "better-result";
+
+function processResult<R extends Result<unknown, unknown>>(
+  result: R
+): InferOk<R> | null {
+  return result.isOk() ? result.value : null;
+}
+
+const numResult = Result.ok(42);
+const value = processResult(numResult);
+// value: number | null
+```
+
+```typescript With Generator Composition
+import { Result, InferOk } from "better-result";
+
+const workflow = Result.gen(function* () {
+  const a = yield* getUser(); // Result<User, NotFoundError>
+  const b = yield* getProfile(a.id); // Result<Profile, DbError>
+  return Result.ok({ user: a, profile: b });
+});
+
+type WorkflowData = InferOk<typeof workflow>;
+// WorkflowData = { user: User, profile: Profile }
+```
+</CodeGroup>
+
+<Note>
+`InferOk` is distributive, meaning it distributes over union types. This is particularly useful when working with multiple Result types in generator compositions.
+</Note>
+
+---
+
+## InferErr
+
+Extracts the error value type from a Result type.
+
+<ParamField path="R" type="Result<T, E>" required>
+  The Result type to extract from
+</ParamField>
+
+<ResponseField name="Return Type" type="E">
+  The error value type E from Result\<T, E\>
+</ResponseField>
+
+### Type Definition
+
+```typescript
+type InferErr<R> = R extends Err<unknown, infer E> ? E : never;
+```
+
+### How It Works
+
+`InferErr` uses a distributive conditional type to extract the error type:
+- For `Err<X, A> | Err<Y, B>`, returns `A | B`
+- For `Result<string, NotFoundError>`, returns `NotFoundError`
+- For non-Result types, returns `never`
+
+### Usage Examples
+
+<CodeGroup>
+```typescript Basic Usage
+import { Result, InferErr } from "better-result";
+
+class ValidationError extends Error {}
+class NetworkError extends Error {}
+
+type ApiResult = Result<string, ValidationError | NetworkError>;
+type Errors = InferErr<ApiResult>;
+// Errors = ValidationError | NetworkError
+```
+
+```typescript Error Handler
+import { Result, InferErr } from "better-result";
+
+function handleError<R extends Result<unknown, unknown>>(
+  result: R,
+  handler: (error: InferErr<R>) => void
+): void {
+  if (result.isErr()) {
+    handler(result.error);
+  }
+}
+
+const result = Result.err(new Error("Failed"));
+handleError(result, (err) => {
+  console.error(err.message); // err is Error
+});
+```
+
+```typescript Extracting Generator Errors
+import { Result, InferErr } from "better-result";
+
+const operation = Result.gen(function* () {
+  const user = yield* fetchUser(); // Result<User, NotFoundError>
+  const data = yield* loadData(user); // Result<Data, DbError>
+  return Result.ok(data);
+});
+
+type OperationErrors = InferErr<typeof operation>;
+// OperationErrors = NotFoundError | DbError
+```
+
+```typescript Error Normalization
+import { Result, InferErr } from "better-result";
+
+class AppError extends Error {
+  constructor(public code: string, message: string) {
+    super(message);
+  }
+}
+
+function normalizeErrors<R extends Result<unknown, unknown>>(
+  result: R
+): Result<InferOk<R>, AppError> {
+  return result.mapError((err) => {
+    if (err instanceof Error) {
+      return new AppError("INTERNAL", err.message);
+    }
+    return new AppError("UNKNOWN", String(err));
+  });
+}
+```
+</CodeGroup>
+
+<Note>
+Both `InferOk` and `InferErr` work seamlessly with `Result.gen` to automatically extract union types from all yielded Results.
+</Note>
+
+---
+
+## Common Patterns
+
+### Type-Safe Result Handlers
+
+```typescript
+import { Result, InferOk, InferErr } from "better-result";
+
+type Handler<R extends Result<unknown, unknown>> = {
+  onSuccess: (value: InferOk<R>) => void;
+  onError: (error: InferErr<R>) => void;
+};
+
+function handle<R extends Result<unknown, unknown>>(
+  result: R,
+  handler: Handler<R>
+): void {
+  result.match({
+    ok: handler.onSuccess,
+    err: handler.onError,
+  });
+}
+
+const result: Result<number, string> = Result.ok(42);
+handle(result, {
+  onSuccess: (n) => console.log(n * 2), // n: number
+  onError: (e) => console.error(e.toUpperCase()), // e: string
+});
+```
+
+### Extracting Types from Complex Workflows
+
+```typescript
+import { Result, InferOk, InferErr } from "better-result";
+
+// Define workflow
+const fetchUserWorkflow = (id: string) =>
+  Result.gen(function* () {
+    const user = yield* getUser(id); // Result<User, NotFoundError>
+    const posts = yield* getPosts(user.id); // Result<Post[], DbError>
+    const profile = yield* getProfile(user.id); // Result<Profile, ApiError>
+
+    return Result.ok({ user, posts, profile });
+  });
+
+// Extract types automatically
+type WorkflowResult = ReturnType<typeof fetchUserWorkflow>;
+type SuccessData = InferOk<Awaited<WorkflowResult>>;
+// SuccessData = { user: User, posts: Post[], profile: Profile }
+
+type AllErrors = InferErr<Awaited<WorkflowResult>>;
+// AllErrors = NotFoundError | DbError | ApiError
+```
+
+### Generic Result Transformers
+
+```typescript
+import { Result, InferOk } from "better-result";
+
+function mapSuccess<R extends Result<unknown, unknown>, U>(
+  result: R,
+  fn: (value: InferOk<R>) => U
+): Result<U, InferErr<R>> {
+  return result.map(fn);
+}
+
+const numResult = Result.ok(42);
+const doubled = mapSuccess(numResult, (n) => n * 2);
+// doubled: Result<number, never>
+```
+
+---
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Result Core" icon="code" href="/api/result">
+    Learn about Result, Ok, and Err classes
+  </Card>
+  <Card title="Serialization" icon="arrow-right-arrow-left" href="/api/serialization-api">
+    Serialize and deserialize Results
+  </Card>
+</CardGroup>

@@ -1,0 +1,405 @@
+---
+title: Panic
+description: Unrecoverable error type for defects in user code
+---
+
+## Overview
+
+`Panic` represents an unrecoverable error that indicates a defect in user code, not a expected failure condition. When thrown, a Panic indicates that something fundamentally wrong has occurred, such as:
+
+- A callback throwing inside a Result combinator
+- Generator cleanup (finally blocks) throwing errors
+- Resource disposal (Symbol.dispose/asyncDispose) failing
+- Other violations of the Result abstraction's invariants
+
+<Warning>
+  Panic errors should never be caught or handled in application logic. They indicate bugs that must be fixed.
+</Warning>
+
+## Class Definition
+
+```typescript
+class Panic extends TaggedError("Panic")<{
+  message: string;
+  cause?: unknown;
+}>() {}
+```
+
+`Panic` is a `TaggedError` with tag `"Panic"` and required `message` property.
+
+## Properties
+
+<ResponseField name="_tag" type="'Panic'" required>
+  Discriminator tag, always `"Panic"`.
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Description of what went wrong.
+</ResponseField>
+
+<ResponseField name="cause" type="unknown">
+  Optional underlying cause of the panic (the original thrown value).
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Error name, set to `"Panic"`.
+</ResponseField>
+
+<ResponseField name="stack" type="string | undefined">
+  Stack trace. If `cause` is an Error, includes "Caused by:" chain.
+</ResponseField>
+
+## Creating Panics
+
+### Constructor
+
+```typescript
+new Panic({ message: string, cause?: unknown })
+```
+
+```typescript
+const panic = new Panic({
+  message: "map callback threw",
+  cause: new Error("original error")
+});
+```
+
+### panic() Function
+
+Helper function that creates and throws a Panic:
+
+```typescript
+panic(message: string, cause?: unknown): never
+```
+
+```typescript
+import { panic } from "better-result";
+
+function processValue(value: unknown) {
+  if (typeof value !== "number") {
+    panic("Expected number, got " + typeof value);
+  }
+  return value * 2;
+}
+```
+
+## When Panics Occur
+
+### Combinator Callbacks Throwing
+
+When user callbacks in Result methods throw errors:
+
+```typescript
+const result = Result.ok(42).map(() => {
+  throw new Error("oops"); // Throws Panic!
+});
+```
+
+<CodeGroup>
+```typescript map
+Result.ok(1).map(() => {
+  throw new Error("boom");
+}); // Panic!
+```
+
+```typescript andThen
+Result.ok(1).andThen(() => {
+  throw new Error("boom");
+}); // Panic!
+```
+
+```typescript match
+Result.ok(1).match({
+  ok: () => { throw new Error("boom"); },
+  err: () => "error"
+}); // Panic!
+```
+
+```typescript mapError
+Result.err("fail").mapError(() => {
+  throw new Error("boom");
+}); // Panic!
+```
+</CodeGroup>
+
+### Generator Cleanup Throwing
+
+When finally blocks throw during Result.gen execution:
+
+```typescript
+const result = Result.gen(function* () {
+  try {
+    yield* Result.err("expected error");
+  } finally {
+    throw new Error("cleanup failed"); // Panic!
+  }
+});
+```
+
+<Note>
+  Panics from cleanup code indicate resource disposal failures - serious bugs that must be fixed.
+</Note>
+
+### Success Path Cleanup Throwing
+
+Cleanup throwing even when the operation succeeded:
+
+```typescript
+const result = Result.gen(function* () {
+  try {
+    const data = yield* fetchData();
+    return Result.ok(data);
+  } finally {
+    throw new Error("logging failed"); // Panic even though data fetch succeeded!
+  }
+});
+```
+
+### Result.try catch Handler Throwing
+
+When the custom error handler itself throws:
+
+```typescript
+const result = Result.try({
+  try: () => JSON.parse(invalid),
+  catch: (cause) => {
+    throw new Error("catch handler failed"); // Panic!
+  }
+});
+```
+
+### Generator Body Throwing Directly
+
+When generator code throws before any yield:
+
+```typescript
+const result = Result.gen(function* () {
+  throw new Error("immediate failure"); // Panic!
+  yield* Result.ok(1);
+});
+```
+
+### Resource Disposal Throwing
+
+When Symbol.dispose or Symbol.asyncDispose throws:
+
+```typescript
+const resource = {
+  value: 42,
+  [Symbol.dispose]() {
+    throw new Error("disposal failed"); // Panic!
+  }
+};
+
+const result = Result.gen(function* () {
+  using res = resource;
+  yield* Result.ok(res.value);
+}); // Panic when disposal happens!
+```
+
+### shouldRetry Predicate Throwing
+
+When retry logic throws:
+
+```typescript
+await Result.tryPromise(
+  () => fetchData(),
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: "exponential",
+      shouldRetry: (error) => {
+        throw new Error("predicate failed"); // Panic!
+      }
+    }
+  }
+);
+```
+
+## Type Guard
+
+```typescript
+isPanic(value: unknown): value is Panic
+```
+
+Check if a value is a Panic instance:
+
+```typescript
+import { isPanic } from "better-result";
+
+try {
+  Result.ok(1).map(() => { throw new Error("boom"); });
+} catch (e) {
+  if (isPanic(e)) {
+    console.error("Panic detected:", e.message);
+    console.error("Cause:", e.cause);
+  }
+}
+```
+
+## Error Messages
+
+Panic errors include descriptive messages indicating what operation failed:
+
+| Panic Message | Cause |
+|---------------|-------|
+| `"map callback threw"` | User callback in `.map()` threw |
+| `"andThen callback threw"` | User callback in `.andThen()` threw |
+| `"generator cleanup threw"` | Finally block threw during cleanup |
+| `"generator body threw"` | Generator threw before yielding |
+| `"Result.try catch handler threw"` | Custom catch handler threw |
+| `"shouldRetry predicate threw"` | Retry predicate threw |
+| `"Unreachable: Err yielded in Result.gen but generator continued"` | Internal invariant violation |
+
+## Stack Traces
+
+Panic errors include full stack traces with cause chaining:
+
+```typescript
+try {
+  Result.ok(1).map(() => {
+    throw new Error("original error");
+  });
+} catch (e) {
+  if (e instanceof Panic) {
+    console.log(e.stack);
+    // Panic: map callback threw
+    //     at ...
+    // Caused by:
+    //   Error: original error
+    //     at ...
+  }
+}
+```
+
+## JSON Serialization
+
+```typescript
+const panic = new Panic({
+  message: "Something went wrong",
+  cause: new Error("root cause")
+});
+
+const json = panic.toJSON();
+// {
+//   _tag: "Panic",
+//   name: "Panic",
+//   message: "Something went wrong",
+//   cause: {
+//     name: "Error",
+//     message: "root cause",
+//     stack: "..."
+//   },
+//   stack: "..."
+// }
+```
+
+## Handling Strategy
+
+<Warning>
+  **Do NOT catch Panics in application logic**. They indicate bugs, not recoverable errors.
+</Warning>
+
+### What to Do When Panic Occurs
+
+1. **Let it crash**: Allow the Panic to propagate and crash the operation
+2. **Fix the bug**: The Panic indicates a defect in your code
+3. **Log and alert**: In production, log Panics for investigation
+
+```typescript
+// ✅ Good - let Panic crash, fix the bug
+const result = Result.ok(data).map(processData);
+
+// ❌ Bad - catching Panic hides bugs
+try {
+  const result = Result.ok(data).map(processData);
+} catch (e) {
+  if (isPanic(e)) {
+    // Don't do this!
+    return Result.err("something went wrong");
+  }
+}
+```
+
+### Production Error Monitoring
+
+Log Panics for monitoring, but don't try to recover:
+
+```typescript
+process.on('uncaughtException', (error) => {
+  if (isPanic(error)) {
+    logger.fatal('Panic detected - bug in application', {
+      message: error.message,
+      cause: error.cause,
+      stack: error.stack
+    });
+    // Re-throw or exit - don't continue
+    process.exit(1);
+  }
+});
+```
+
+## Panic vs Expected Errors
+
+| Scenario | Use | Example |
+|----------|-----|----------|
+| User provides invalid input | `Result.err()` | Validation failure |
+| External service unavailable | `Result.err()` | Network timeout |
+| Callback throws inside map | `Panic` | Bug in callback |
+| Cleanup code throws | `Panic` | Resource disposal bug |
+| Type guard fails | `Panic` | Invariant violation |
+
+## Best Practices
+
+1. **Never catch Panics**: Let them crash and fix the underlying bug
+   ```typescript
+   // ❌ Bad
+   try {
+     result.map(fn);
+   } catch (e) {
+     if (isPanic(e)) return Result.err("error");
+   }
+   ```
+
+2. **Don't throw in callbacks**: Use `Result.err()` for expected failures
+   ```typescript
+   // ❌ Bad - throws Panic
+   result.map(x => {
+     if (invalid(x)) throw new Error("bad");
+   });
+   
+   // ✅ Good - returns Err
+   result.andThen(x => {
+     if (invalid(x)) return Result.err(new ValidationError(...));
+     return Result.ok(process(x));
+   });
+   ```
+
+3. **Test cleanup code**: Ensure finally blocks and disposal don't throw
+   ```typescript
+   Result.gen(function* () {
+     try {
+       yield* operation();
+     } finally {
+       // Make sure this can't throw!
+       await cleanup().catch(() => { /* log but don't throw */ });
+     }
+   });
+   ```
+
+4. **Validate assumptions**: Use type guards and assertions
+   ```typescript
+   function process(value: unknown) {
+     if (typeof value !== "number") {
+       panic("Expected number"); // Document invariant violations
+     }
+   }
+   ```
+
+## See Also
+
+- [UnhandledException](/api/unhandled-exception) - For expected exceptions from Result.try
+- [TaggedError](/api/tagged-error) - Base class for Panic
+- [Result.try](/api/result#try) - Catching expected exceptions
+- [Result.gen](/api/result#gen) - Generator-based composition

@@ -1,0 +1,406 @@
+---
+title: "Migration Guide: v1 to v2"
+description: "Upgrade from better-result v1 to v2 with automated migration tools and step-by-step instructions"
+---
+
+## Overview
+
+Version 2 of better-result introduces a streamlined TaggedError API that reduces boilerplate and improves type safety. This guide covers breaking changes, migration strategies, and new features.
+
+<Note>
+  The v2 migration primarily affects TaggedError class definitions and static methods. Core Result APIs remain unchanged.
+</Note>
+
+## Breaking Changes
+
+### TaggedError API
+
+The most significant change is the new factory-based TaggedError API:
+
+<CodeGroup>
+```typescript v1 (Before)
+class NotFoundError extends TaggedError {
+  readonly _tag = "NotFoundError" as const;
+  constructor(readonly id: string) {
+    super(`Not found: ${id}`);
+  }
+}
+
+const err = new NotFoundError("123");
+```
+
+```typescript v2 (After)
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+const err = new NotFoundError({ id: "123", message: "Not found: 123" });
+```
+</CodeGroup>
+
+**Key differences:**
+- No manual `_tag` declaration needed
+- Constructor accepts object with all properties
+- Factory pattern: `TaggedError(tag)<Props>()`
+
+### Match Functions
+
+Static methods on `TaggedError` are now standalone functions:
+
+<CodeGroup>
+```typescript v1 (Before)
+import { TaggedError } from "better-result";
+
+TaggedError.match(error, { ... })
+TaggedError.matchPartial(error, { ... }, fallback)
+TaggedError.isTaggedError(value)
+```
+
+```typescript v2 (After)
+import { matchError, matchErrorPartial, isTaggedError } from "better-result";
+
+matchError(error, { ... })
+matchErrorPartial(error, { ... }, fallback)
+isTaggedError(value)
+```
+</CodeGroup>
+
+## Automated Migration
+
+### CLI Migration Tool
+
+The fastest way to migrate is using the interactive CLI:
+
+```bash
+npx better-result migrate
+```
+
+This command:
+1. Installs migration dependencies
+2. Detects your AI agent configuration (OpenCode, Claude, Codex)
+3. Installs the migration skill
+4. Optionally launches your agent
+
+### Using the Migration Skill
+
+Once installed, use the skill in your AI agent:
+
+```
+/skill better-result-migrate-v2
+```
+
+Then ask: **"Migrate my TaggedError classes to v2"**
+
+<Info>
+  The migration skill handles complex transformations including computed messages, validation logic, and import updates.
+</Info>
+
+## Manual Migration Steps
+
+If you prefer manual migration, follow these steps:
+
+<Steps>
+  <Step title="Update class declarations">
+    Convert class-based TaggedError to factory pattern:
+
+    ```typescript
+    // Before
+    class MyError extends TaggedError {
+      readonly _tag = "MyError" as const;
+      constructor(readonly code: number) {
+        super(`Error ${code}`);
+      }
+    }
+
+    // After
+    class MyError extends TaggedError("MyError")<{
+      code: number;
+      message: string;
+    }>() {
+      constructor(args: { code: number }) {
+        super({ ...args, message: `Error ${args.code}` });
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Update constructor calls">
+    Change from positional arguments to object syntax:
+
+    ```typescript
+    // Before
+    throw new MyError(404);
+
+    // After
+    throw new MyError({ code: 404 });
+    ```
+  </Step>
+
+  <Step title="Replace static methods">
+    Update match functions:
+
+    ```typescript
+    // Before
+    const msg = TaggedError.match(error, {
+      NotFoundError: (e) => `Missing: ${e.id}`,
+      ValidationError: (e) => `Invalid: ${e.field}`,
+    });
+
+    // After
+    const msg = matchError(error, {
+      NotFoundError: (e) => `Missing: ${e.id}`,
+      ValidationError: (e) => `Invalid: ${e.field}`,
+    });
+    ```
+  </Step>
+
+  <Step title="Update imports">
+    Add new exports to your imports:
+
+    ```typescript
+    import {
+      TaggedError,
+      matchError,
+      matchErrorPartial,
+      isTaggedError,
+    } from "better-result";
+    ```
+  </Step>
+</Steps>
+
+## Migration Patterns
+
+### Simple Class (No Constructor Logic)
+
+For errors without custom constructor logic, remove the constructor entirely:
+
+```typescript
+// Before
+class FooError extends TaggedError {
+  readonly _tag = "FooError" as const;
+  constructor(readonly id: string) {
+    super(`Foo: ${id}`);
+  }
+}
+
+// After
+class FooError extends TaggedError("FooError")<{
+  id: string;
+  message: string;
+}>() {}
+
+// Usage: new FooError({ id: "123", message: "Foo: 123" })
+```
+
+### Class with Computed Message
+
+Keep custom constructor for derived messages:
+
+```typescript
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  status: number;
+  message: string;
+}>() {
+  constructor(args: { url: string; status: number }) {
+    super({
+      ...args,
+      message: `Request to ${args.url} failed with ${args.status}`,
+    });
+  }
+}
+
+// Usage: new NetworkError({ url: "/api", status: 404 })
+```
+
+### Class with Validation
+
+Preserve validation logic in the constructor:
+
+```typescript
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {
+  constructor(args: { field: string }) {
+    if (!args.field) throw new Error("field required");
+    super({ ...args, message: `Invalid: ${args.field}` });
+  }
+}
+```
+
+### Class with Runtime Properties
+
+Compute runtime values in constructor:
+
+```typescript
+class TimestampedError extends TaggedError("TimestampedError")<{
+  reason: string;
+  timestamp: number;
+  message: string;
+}>() {
+  constructor(args: { reason: string }) {
+    super({
+      ...args,
+      message: args.reason,
+      timestamp: Date.now(),
+    });
+  }
+}
+```
+
+## New Features in v2
+
+### Simpler Error Definitions
+
+No more boilerplate `_tag` declarations:
+
+```typescript
+// Clean factory API
+class MyError extends TaggedError("MyError")<{
+  code: number;
+  message: string;
+}>() {}
+```
+
+### Dual-Style Match Functions
+
+New match functions support both data-first and data-last (pipeable) styles:
+
+```typescript
+// Data-first
+matchError(error, {
+  MyError: (e) => e.code,
+});
+
+// Data-last (pipeable)
+pipe(
+  error,
+  matchError({
+    MyError: (e) => e.code,
+  })
+);
+```
+
+### Panic: Explicit Defect Handling
+
+v2 introduces `Panic` for unrecoverable errors when user callbacks throw inside Result operations:
+
+```typescript
+import { Panic, panic, isPanic } from "better-result";
+
+// Callbacks that throw now cause Panic
+try {
+  Result.ok(1).map(() => {
+    throw new Error("bug in map callback");
+  });
+} catch (error) {
+  if (isPanic(error)) {
+    console.error("Defect:", error.message, error.cause);
+  }
+}
+
+// Generator cleanup throws → Panic
+Result.gen(function* () {
+  try {
+    yield* Result.err("expected failure");
+  } finally {
+    throw new Error("cleanup bug"); // throws Panic
+  }
+});
+
+// Manual panic for unrecoverable situations
+panic("something went critically wrong", cause);
+```
+
+<Warning>
+  **Why Panic?** `Err` is for recoverable domain errors. Panic is for bugs—like Rust's `panic!()`. If your `.map()` callback throws, that's not an error to handle, it's a defect to fix. Returning `Err` would collapse type safety.
+</Warning>
+
+**Panic detection:**
+
+```typescript
+if (isPanic(error)) { ... }         // Type guard function
+if (Panic.is(error)) { ... }         // Static method
+if (error instanceof Panic) { ... }  // instanceof check
+```
+
+## Complete Migration Example
+
+<Accordion title="View full before/after example">
+  **Before (v1):**
+
+  ```typescript
+  import { TaggedError } from "better-result";
+
+  class NotFoundError extends TaggedError {
+    readonly _tag = "NotFoundError" as const;
+    constructor(readonly id: string) {
+      super(`Not found: ${id}`);
+    }
+  }
+
+  class NetworkError extends TaggedError {
+    readonly _tag = "NetworkError" as const;
+    constructor(
+      readonly url: string,
+      readonly status: number
+    ) {
+      super(`Request to ${url} failed with ${status}`);
+    }
+  }
+
+  type AppError = NotFoundError | NetworkError;
+
+  const handleError = (err: AppError) =>
+    TaggedError.match(err, {
+      NotFoundError: (e) => `Missing: ${e.id}`,
+      NetworkError: (e) => `Failed: ${e.url}`,
+    });
+  ```
+
+  **After (v2):**
+
+  ```typescript
+  import { TaggedError, matchError } from "better-result";
+
+  class NotFoundError extends TaggedError("NotFoundError")<{
+    id: string;
+    message: string;
+  }>() {
+    constructor(args: { id: string }) {
+      super({ ...args, message: `Not found: ${args.id}` });
+    }
+  }
+
+  class NetworkError extends TaggedError("NetworkError")<{
+    url: string;
+    status: number;
+    message: string;
+  }>() {
+    constructor(args: { url: string; status: number }) {
+      super({
+        ...args,
+        message: `Request to ${args.url} failed with ${args.status}`,
+      });
+    }
+  }
+
+  type AppError = NotFoundError | NetworkError;
+
+  const handleError = (err: AppError) =>
+    matchError(err, {
+      NotFoundError: (e) => `Missing: ${e.id}`,
+      NetworkError: (e) => `Failed: ${e.url}`,
+    });
+  ```
+</Accordion>
+
+## Next Steps
+
+After migration, explore v2's enhanced features:
+
+- [Tagged Errors](/api/tagged-error) - Full API reference
+- [Error Handling](/core/error-handling) - Advanced error patterns
+- [Generator Composition](/core/generator-composition) - Railway-oriented programming

@@ -1,0 +1,475 @@
+---
+title: "Async Operations"
+description: "Work with promises and async generators in Result workflows"
+---
+
+## Overview
+
+better-result provides first-class support for asynchronous operations through `Result.tryPromise`, `Result.await`, and async generator composition. This enables Railway-Oriented Programming patterns with async/await syntax.
+
+## Handling Promises with tryPromise
+
+The `Result.tryPromise` function wraps promise-based operations, converting rejections into `Err` values:
+
+```typescript
+import { Result } from 'better-result';
+
+// Basic promise handling
+const result = await Result.tryPromise(() => 
+  fetch('https://api.example.com/user')
+);
+
+if (Result.isOk(result)) {
+  const response = result.value;
+  console.log('Fetch succeeded:', response.status);
+} else {
+  // result.error is UnhandledException
+  console.error('Fetch failed:', result.error.cause);
+}
+```
+
+### Custom Error Handling
+
+Provide a `catch` handler to transform exceptions into typed errors:
+
+```typescript
+class NetworkError extends TaggedError('NetworkError')<{
+  message: string;
+  url: string;
+  status?: number;
+}>() {}
+
+const result = await Result.tryPromise(
+  {
+    try: () => fetch('https://api.example.com/data'),
+    catch: (e) => {
+      const error = e as Error;
+      return new NetworkError({
+        message: error.message,
+        url: 'https://api.example.com/data'
+      });
+    }
+  }
+);
+
+// Type: Result<Response, NetworkError>
+```
+
+<Note>
+  The `catch` handler can be async, allowing you to enrich errors with additional context from external sources (databases, caches, etc.).
+</Note>
+
+## Async Generator Composition with Result.await
+
+The `Result.await` function makes `Promise<Result>` values yieldable in async generators:
+
+```typescript
+const fetchUser = async (id: string): Promise<Result<User, NotFoundError>> => {
+  return await Result.tryPromise(
+    {
+      try: () => fetch(`/api/users/${id}`).then(r => r.json()),
+      catch: (e) => new NotFoundError({ id, message: String(e) })
+    }
+  );
+};
+
+const fetchPosts = async (userId: string): Promise<Result<Post[], DbError>> => {
+  // ... implementation
+};
+
+// Compose async operations with Result.gen
+const result = await Result.gen(async function* () {
+  const user = yield* Result.await(fetchUser('123'));
+  const posts = yield* Result.await(fetchPosts(user.id));
+  
+  return Result.ok({ user, posts });
+});
+
+// Type: Result<{ user: User, posts: Post[] }, NotFoundError | DbError>
+```
+
+### How Result.await Works
+
+Under the hood, `Result.await` is an async generator that awaits the promise and yields the result:
+
+```typescript
+// From src/result.ts:715-720
+async function* resultAwait<T, E>(
+  promise: Promise<Result<T, E>>,
+): AsyncGenerator<Err<never, E>, T, unknown> {
+  const result = await promise;
+  return yield* result;
+}
+```
+
+When used with `yield*`, it unwraps `Ok` values and short-circuits on `Err`.
+
+## Async Combinators
+
+### andThenAsync
+
+Chain async Result-returning functions:
+
+```typescript
+const parseUser = (data: string): Result<unknown, ParseError> => {
+  try {
+    return Result.ok(JSON.parse(data));
+  } catch (e) {
+    return Result.err(new ParseError({ message: String(e) }));
+  }
+};
+
+const validateUser = async (data: unknown): Promise<Result<User, ValidationError>> => {
+  // Async validation logic
+  await new Promise(resolve => setTimeout(resolve, 10));
+  
+  if (typeof data === 'object' && data !== null && 'id' in data) {
+    return Result.ok(data as User);
+  }
+  
+  return Result.err(new ValidationError({ message: 'Invalid user' }));
+};
+
+const result = await parseUser(jsonString)
+  .andThenAsync(validateUser);
+
+// Type: Result<User, ParseError | ValidationError>
+```
+
+### tapAsync
+
+Perform async side effects without changing the Result:
+
+```typescript
+const result = await Result.ok({ id: 1, name: 'Alice' })
+  .tapAsync(async (user) => {
+    await logToDatabase({ event: 'user_created', user });
+    await sendWelcomeEmail(user.email);
+  })
+  .map(user => user.id);
+
+// Value flows through unchanged after side effects
+// Type: Result<number, never>
+```
+
+<Warning>
+  If the async callback in `tapAsync` throws or rejects, it results in a `Panic`. Use `Result.tryPromise` inside `tapAsync` if the side effect can fail.
+</Warning>
+
+## Parallel Operations
+
+Execute multiple async operations concurrently and collect results:
+
+### Promise.all with Results
+
+```typescript
+const fetchUserData = async (userId: string) => {
+  const [profileResult, postsResult, friendsResult] = await Promise.all([
+    Result.tryPromise(() => fetchProfile(userId)),
+    Result.tryPromise(() => fetchPosts(userId)),
+    Result.tryPromise(() => fetchFriends(userId))
+  ]);
+
+  // All Results are available, can handle individually
+  return Result.gen(function* () {
+    const profile = yield* profileResult;
+    const posts = yield* postsResult;
+    const friends = yield* friendsResult;
+    
+    return Result.ok({ profile, posts, friends });
+  });
+};
+```
+
+### Partition for Batch Operations
+
+Use `Result.partition` to separate successes from failures:
+
+```typescript
+const userIds = ['1', '2', '3', '4', '5'];
+
+const results = await Promise.all(
+  userIds.map(id => Result.tryPromise(() => fetchUser(id)))
+);
+
+const [users, errors] = Result.partition(results);
+
+console.log(`Successfully fetched ${users.length} users`);
+console.log(`Failed to fetch ${errors.length} users`);
+
+// Continue with partial success
+if (users.length > 0) {
+  await processUsers(users);
+}
+```
+
+### Fail-Fast vs Collect-All
+
+<Tabs>
+  <Tab title="Fail-Fast">
+    Stop at the first error using `Result.gen`:
+
+    ```typescript
+    const result = await Result.gen(async function* () {
+      const user = yield* Result.await(fetchUser(userId));
+      // Stops here if user fetch fails
+      const posts = yield* Result.await(fetchPosts(user.id));
+      const comments = yield* Result.await(fetchComments(user.id));
+      
+      return Result.ok({ user, posts, comments });
+    });
+    ```
+  </Tab>
+  <Tab title="Collect-All">
+    Gather all results before processing:
+
+    ```typescript
+    const [userResult, postsResult, commentsResult] = await Promise.all([
+      fetchUser(userId),
+      fetchPosts(userId),
+      fetchComments(userId)
+    ]);
+
+    const result = Result.gen(function* () {
+      const user = yield* userResult;
+      const posts = yield* postsResult;
+      const comments = yield* commentsResult;
+      
+      return Result.ok({ user, posts, comments });
+    });
+    
+    // All operations completed, even if some failed
+    // Error is from the first failure in the sequence
+    ```
+  </Tab>
+</Tabs>
+
+## Real-World Patterns
+
+### API Request Pipeline
+
+```typescript
+class RateLimitError extends TaggedError('RateLimitError')<{
+  message: string;
+  retryAfter: number;
+}>() {}
+
+class ApiError extends TaggedError('ApiError')<{
+  message: string;
+  status: number;
+}>() {}
+
+const apiRequest = async <T>(
+  endpoint: string
+): Promise<Result<T, RateLimitError | ApiError>> => {
+  return await Result.tryPromise(
+    {
+      try: async () => {
+        const response = await fetch(`https://api.example.com${endpoint}`);
+        
+        if (!response.ok) {
+          if (response.status === 429) {
+            const retryAfter = parseInt(
+              response.headers.get('Retry-After') || '60'
+            );
+            throw { type: 'rate_limit', retryAfter };
+          }
+          throw { type: 'api_error', status: response.status };
+        }
+        
+        return await response.json() as T;
+      },
+      catch: (e: any) => {
+        if (e.type === 'rate_limit') {
+          return new RateLimitError({
+            message: 'Rate limit exceeded',
+            retryAfter: e.retryAfter
+          });
+        }
+        return new ApiError({
+          message: 'API request failed',
+          status: e.status || 500
+        });
+      }
+    },
+    {
+      retry: {
+        times: 3,
+        delayMs: 1000,
+        backoff: 'exponential',
+        shouldRetry: (e) => e._tag === 'ApiError' && e.status >= 500
+      }
+    }
+  );
+};
+```
+
+### Database Transaction Flow
+
+```typescript
+interface DbConnection {
+  query<T>(sql: string, params: unknown[]): Promise<T>;
+  begin(): Promise<void>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+class TransactionError extends TaggedError('TransactionError')<{
+  message: string;
+  cause?: unknown;
+}>() {}
+
+const withTransaction = async <T>(
+  db: DbConnection,
+  operation: (db: DbConnection) => Promise<Result<T, Error>>
+): Promise<Result<T, TransactionError>> => {
+  return await Result.tryPromise(
+    {
+      try: async () => {
+        await db.begin();
+        
+        const result = await operation(db);
+        
+        if (Result.isError(result)) {
+          await db.rollback();
+          throw result.error;
+        }
+        
+        await db.commit();
+        return result.value;
+      },
+      catch: (e) => new TransactionError({
+        message: 'Transaction failed',
+        cause: e
+      })
+    }
+  );
+};
+
+// Usage
+const result = await withTransaction(db, async (tx) => {
+  return await Result.gen(async function* () {
+    const user = yield* Result.await(
+      Result.tryPromise(() => tx.query('INSERT INTO users...'))
+    );
+    
+    const profile = yield* Result.await(
+      Result.tryPromise(() => tx.query('INSERT INTO profiles...'))
+    );
+    
+    return Result.ok({ user, profile });
+  });
+});
+```
+
+### Streaming Data Processing
+
+```typescript
+const processStream = async function* (
+  stream: ReadableStream<Uint8Array>
+): AsyncGenerator<Result<ProcessedChunk, StreamError>, void, unknown> {
+  const reader = stream.getReader();
+  
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      const result = await Result.tryPromise(
+        {
+          try: () => processChunk(value),
+          catch: (e) => new StreamError({
+            message: String(e),
+            chunkSize: value.length
+          })
+        }
+      );
+      
+      yield result;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+};
+
+// Consume stream with error handling
+for await (const result of processStream(dataStream)) {
+  if (Result.isError(result)) {
+    console.error('Chunk processing failed:', result.error);
+    continue; // Or break to stop processing
+  }
+  
+  await saveToDatabase(result.value);
+}
+```
+
+## Testing Async Operations
+
+```typescript
+import { describe, it, expect } from 'bun:test';
+import { Result } from 'better-result';
+
+describe('Async Operations', () => {
+  it('handles successful promise', async () => {
+    const result = await Result.tryPromise(() => 
+      Promise.resolve(42)
+    );
+    
+    expect(Result.isOk(result)).toBe(true);
+    expect(result.unwrap()).toBe(42);
+  });
+
+  it('handles rejected promise', async () => {
+    const result = await Result.tryPromise(() => 
+      Promise.reject(new Error('boom'))
+    );
+    
+    expect(Result.isError(result)).toBe(true);
+    if (Result.isError(result)) {
+      expect(result.error).toBeInstanceOf(UnhandledException);
+    }
+  });
+
+  it('composes async operations with Result.await', async () => {
+    const getUser = async (id: string) => 
+      Result.ok({ id, name: 'Alice' });
+    
+    const getPosts = async (userId: string) => 
+      Result.ok([{ id: 1, userId }]);
+    
+    const result = await Result.gen(async function* () {
+      const user = yield* Result.await(getUser('123'));
+      const posts = yield* Result.await(getPosts(user.id));
+      
+      return Result.ok({ user, posts });
+    });
+    
+    expect(Result.isOk(result)).toBe(true);
+    expect(result.unwrap().user.name).toBe('Alice');
+  });
+});
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Always await Result.tryPromise">
+    `Result.tryPromise` returns a `Promise<Result>`, not a `Result`. Don't forget the `await`.
+  </Step>
+  <Step title="Use Result.await in async generators">
+    When working with `Promise<Result>` in `Result.gen`, use `Result.await` to make it yieldable.
+  </Step>
+  <Step title="Provide typed error handlers">
+    Use the `{ try, catch }` form to transform exceptions into typed errors for better type safety.
+  </Step>
+  <Step title="Consider parallelization">
+    Use `Promise.all` with `Result.tryPromise` for independent operations to improve performance.
+  </Step>
+  <Step title="Handle partial failures gracefully">
+    Use `Result.partition` to process successful results even when some operations fail.
+  </Step>
+</Steps>
+
+<Info>
+  Async operations in `Result.gen` short-circuit on the first error. If you need to collect all errors, fetch results in parallel first, then process them in the generator.
+</Info>

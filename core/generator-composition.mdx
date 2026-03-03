@@ -1,0 +1,672 @@
+---
+title: Generator Composition
+description: Master Result.gen() for imperative-style error handling with automatic short-circuiting and type-safe error unions
+---
+
+## Overview
+
+`Result.gen()` enables **imperative-style** error handling using JavaScript generators and `yield*` syntax:
+
+- Write code that looks synchronous but short-circuits on first error
+- Automatic error type union inference across multiple yields
+- Support for `finally` blocks, `using` declarations, and async operations
+- Type-safe alternative to try-catch and promise chaining
+
+## Basic Usage
+
+### Simple Composition
+
+```typescript
+const getA = (): Result<number, string> => Result.ok(1);
+const getB = (a: number): Result<number, string> => Result.ok(a + 1);
+const getC = (b: number): Result<number, string> => Result.ok(b + 1);
+
+const result = Result.gen(function* () {
+  const a = yield* getA();  // Unwraps Ok(1) -> a = 1
+  const b = yield* getB(a); // Unwraps Ok(2) -> b = 2
+  const c = yield* getC(b); // Unwraps Ok(3) -> c = 3
+  return Result.ok(c);
+});
+// Result<number, string> = Ok(3)
+```
+
+### Short-Circuiting on Error
+
+When any `yield*` encounters an `Err`, execution stops immediately:
+
+```typescript
+class ErrorA extends TaggedError("ErrorA")<{ message: string }>() {}
+class ErrorB extends TaggedError("ErrorB")<{ message: string }>() {}
+
+const result = Result.gen(function* () {
+  const a = yield* Result.ok(1);                     // a = 1
+  const b = yield* Result.err(new ErrorA({ message: "failed" })); // Stops here!
+  const c = yield* Result.ok(3);                     // Never executed
+  return Result.ok(a + b + c);
+});
+// Result<number, ErrorA> = Err(ErrorA)
+```
+
+<Info>
+This is **railway-oriented programming**: operations proceed on the "success track" until an error switches to the "error track".
+</Info>
+
+## How It Works
+
+### The yield\* Operator
+
+`yield*` delegates to the iterator protocol. `Ok` and `Err` implement `[Symbol.iterator]`:
+
+```typescript
+// From result.ts
+class Ok<A, E> {
+  *[Symbol.iterator](): Generator<Err<never, E>, A, unknown> {
+    return this.value; // Immediately returns without yielding
+  }
+}
+
+class Err<T, E> {
+  *[Symbol.iterator](): Generator<Err<never, E>, never, unknown> {
+    yield this as unknown as Err<never, E>; // Yields error, stops execution
+    return panic("Unreachable", this.error);
+  }
+}
+```
+
+When `Result.gen()` encounters a yielded `Err`, it stops the generator and returns that error.
+
+### Type Inference
+
+TypeScript infers the union of all yielded error types:
+
+```typescript
+class ErrorA extends TaggedError("ErrorA")<{ message: string }>() {}
+class ErrorB extends TaggedError("ErrorB")<{ message: string }>() {}
+class ErrorC extends TaggedError("ErrorC")<{ message: string }>() {}
+
+const getA = (): Result<number, ErrorA> => Result.ok(1);
+const getB = (): Result<number, ErrorB> => Result.ok(2);
+const getC = (): Result<number, ErrorC> => Result.ok(3);
+
+const result = Result.gen(function* () {
+  const a = yield* getA(); // Can fail with ErrorA
+  const b = yield* getB(); // Can fail with ErrorB
+  const c = yield* getC(); // Can fail with ErrorC
+  return Result.ok(a + b + c);
+});
+// Result<number, ErrorA | ErrorB | ErrorC>
+```
+
+## Comparison to Other Patterns
+
+### vs Try-Catch
+
+<CodeGroup>
+```typescript Try-Catch (throws)
+try {
+  const user = await fetchUser(id);
+  const validated = await validateUser(user);
+  const saved = await saveUser(validated);
+  return saved;
+} catch (error) {
+  // All errors lumped together
+  // No type safety on error
+  console.error(error);
+  throw error;
+}
+```
+
+```typescript Result.gen (type-safe)
+const result = await Result.gen(async function* () {
+  const user = yield* Result.await(fetchUser(id));
+  const validated = yield* Result.await(validateUser(user));
+  const saved = yield* Result.await(saveUser(validated));
+  return Result.ok(saved);
+});
+// Result<User, NotFoundError | ValidationError | DatabaseError>
+
+return result.match({
+  ok: (user) => user,
+  err: (error) => matchError(error, {
+    NotFoundError: (e) => handleNotFound(e),
+    ValidationError: (e) => handleValidation(e),
+    DatabaseError: (e) => handleDatabase(e),
+  }),
+});
+```
+</CodeGroup>
+
+### vs Promise Chaining
+
+<CodeGroup>
+```typescript Promise Chaining
+fetchUser(id)
+  .then(user => validateUser(user))
+  .then(validated => saveUser(validated))
+  .then(saved => {
+    console.log("Success:", saved);
+    return saved;
+  })
+  .catch(error => {
+    console.error("Error:", error);
+    throw error;
+  });
+```
+
+```typescript Result.gen
+const result = await Result.gen(async function* () {
+  const user = yield* Result.await(fetchUser(id));
+  const validated = yield* Result.await(validateUser(user));
+  const saved = yield* Result.await(saveUser(validated));
+  
+  console.log("Success:", saved);
+  return Result.ok(saved);
+});
+
+if (result.isErr()) {
+  console.error("Error:", result.error);
+}
+```
+</CodeGroup>
+
+### vs andThen Chaining
+
+<CodeGroup>
+```typescript andThen (functional)
+fetchUser(id)
+  .andThen(user => validateUser(user))
+  .andThen(validated => saveUser(validated))
+  .tap(saved => console.log("Success:", saved));
+```
+
+```typescript Result.gen (imperative)
+Result.gen(function* () {
+  const user = yield* fetchUser(id);
+  const validated = yield* validateUser(user);
+  const saved = yield* saveUser(validated);
+  console.log("Success:", saved);
+  return Result.ok(saved);
+});
+```
+</CodeGroup>
+
+<Tip>
+Use `andThen()` for simple linear chains. Use `Result.gen()` when you need:
+- Multiple intermediate values
+- Conditional logic
+- Loops or complex control flow
+- Resource cleanup with `finally`
+</Tip>
+
+## Async Generators
+
+### Result.await()
+
+Wrap `Promise<Result>` to make it yieldable in async generators:
+
+```typescript
+const fetchUser = (id: string): Promise<Result<User, NotFoundError>> => {
+  // ...
+};
+
+const result = await Result.gen(async function* () {
+  const user = yield* Result.await(fetchUser("123"));
+  const profile = yield* Result.await(fetchProfile(user.id));
+  return Result.ok({ user, profile });
+});
+```
+
+### Mixing Sync and Async
+
+```typescript
+const result = await Result.gen(async function* () {
+  // Sync operation
+  const validated = yield* validateInput(input);
+  
+  // Async operation
+  const user = yield* Result.await(fetchUser(validated.id));
+  
+  // Another sync operation
+  const enriched = yield* enrichUserData(user);
+  
+  return Result.ok(enriched);
+});
+```
+
+## Error Propagation
+
+### Automatic Error Union
+
+Errors from all yields are automatically unioned:
+
+```typescript
+class NotFoundError extends TaggedError("NotFoundError")<{
+  id: string;
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+class DatabaseError extends TaggedError("DatabaseError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+const processUser = (id: string): Result<User, NotFoundError | ValidationError | DatabaseError> => {
+  return Result.gen(function* () {
+    const user = yield* fetchUser(id);        // NotFoundError
+    const validated = yield* validateUser(user); // ValidationError
+    const saved = yield* saveUser(validated);    // DatabaseError
+    return Result.ok(saved);
+  });
+};
+```
+
+### Normalizing Error Types
+
+Use `mapError()` to convert error unions to a single type:
+
+```typescript
+class AppError extends TaggedError("AppError")<{
+  message: string;
+  originalTag: string;
+}>() {}
+
+const processUser = (id: string): Result<User, AppError> => {
+  return Result.gen(function* () {
+    const user = yield* fetchUser(id);
+    const validated = yield* validateUser(user);
+    const saved = yield* saveUser(validated);
+    return Result.ok(saved);
+  }).mapError(e => new AppError({
+    message: e.message,
+    originalTag: e._tag,
+  }));
+};
+```
+
+## Resource Cleanup
+
+### Finally Blocks
+
+`finally` blocks run even when short-circuiting:
+
+```typescript
+const result = Result.gen(function* () {
+  let resource: Resource | null = null;
+  
+  try {
+    resource = yield* acquireResource();
+    const data = yield* processResource(resource);
+    return Result.ok(data);
+  } finally {
+    if (resource) {
+      resource.cleanup();
+    }
+  }
+});
+```
+
+<Warning>
+If a `finally` block throws, `Result.gen()` will throw a `Panic`. Ensure cleanup code doesn't throw:
+
+```typescript
+finally {
+  // Bad: might throw
+  resource.cleanup();
+  
+  // Good: catch errors
+  try {
+    resource.cleanup();
+  } catch (e) {
+    console.error("Cleanup failed:", e);
+  }
+}
+```
+</Warning>
+
+### Using Declarations (Resource Management)
+
+TC39 Explicit Resource Management (Stage 3) works with `Result.gen()`:
+
+```typescript
+const result = Result.gen(function* () {
+  using resource = yield* acquireResource();
+  // resource implements Symbol.dispose
+  
+  const data = yield* processResource(resource);
+  
+  // resource.cleanup() called automatically, even on error
+  return Result.ok(data);
+});
+```
+
+### Async Resource Management
+
+```typescript
+const result = await Result.gen(async function* () {
+  await using connection = yield* Result.await(connectToDatabase());
+  // connection implements Symbol.asyncDispose
+  
+  const user = yield* Result.await(fetchUser(connection, id));
+  
+  // connection.close() called automatically
+  return Result.ok(user);
+});
+```
+
+## Complex Control Flow
+
+### Conditional Logic
+
+```typescript
+const processOrder = (orderId: string): Result<Order, AppError> => {
+  return Result.gen(function* () {
+    const order = yield* fetchOrder(orderId);
+    
+    if (order.status === "pending") {
+      const validated = yield* validateOrder(order);
+      const processed = yield* processPayment(validated);
+      return Result.ok(processed);
+    } else if (order.status === "shipped") {
+      return Result.err(new OrderAlreadyShippedError({ orderId }));
+    } else {
+      const refunded = yield* refundOrder(order);
+      return Result.ok(refunded);
+    }
+  });
+};
+```
+
+### Loops
+
+```typescript
+const processItems = (
+  items: string[]
+): Result<ProcessedItem[], ProcessError> => {
+  return Result.gen(function* () {
+    const results: ProcessedItem[] = [];
+    
+    for (const item of items) {
+      const validated = yield* validateItem(item);
+      const processed = yield* processItem(validated);
+      results.push(processed);
+    }
+    
+    return Result.ok(results);
+  });
+};
+```
+
+<Note>
+If any `yield*` in the loop fails, the entire operation stops and returns that error.
+</Note>
+
+### Early Returns
+
+```typescript
+const updateUser = (
+  id: string,
+  data: UserUpdate
+): Result<User, AppError> => {
+  return Result.gen(function* () {
+    const user = yield* fetchUser(id);
+    
+    // Early return on condition
+    if (user.deleted) {
+      return Result.err(new UserDeletedError({ id }));
+    }
+    
+    if (!user.emailVerified && data.email) {
+      return Result.err(new EmailNotVerifiedError({ id }));
+    }
+    
+    const updated = yield* saveUser({ ...user, ...data });
+    return Result.ok(updated);
+  });
+};
+```
+
+## Context Binding
+
+Bind `this` context with the second parameter:
+
+```typescript
+class UserService {
+  constructor(private db: Database) {}
+  
+  async processUser(id: string): Promise<Result<User, AppError>> {
+    return Result.gen(async function* (this: UserService) {
+      const user = yield* Result.await(this.db.fetchUser(id));
+      const validated = yield* this.validateUser(user);
+      return Result.ok(validated);
+    }, this);
+  }
+  
+  validateUser(user: User): Result<User, ValidationError> {
+    // ...
+  }
+}
+```
+
+## Real-World Examples
+
+### User Registration Flow
+
+```typescript
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+class DuplicateError extends TaggedError("DuplicateError")<{
+  email: string;
+  message: string;
+}>() {}
+
+class EmailError extends TaggedError("EmailError")<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+type RegistrationError = ValidationError | DuplicateError | EmailError;
+
+const registerUser = async (
+  input: RegistrationInput
+): Promise<Result<User, RegistrationError>> => {
+  return Result.gen(async function* () {
+    // Validate input
+    const validated = yield* validateInput(input);
+    
+    // Check for existing user
+    const existing = yield* Result.await(findUserByEmail(validated.email));
+    if (existing.isOk()) {
+      return Result.err(new DuplicateError({
+        email: validated.email,
+        message: "Email already registered",
+      }));
+    }
+    
+    // Hash password
+    const hashedPassword = yield* hashPassword(validated.password);
+    
+    // Create user
+    const user = yield* Result.await(
+      createUser({ ...validated, password: hashedPassword })
+    );
+    
+    // Send welcome email (don't fail registration if this fails)
+    const emailResult = yield* Result.await(
+      sendWelcomeEmail(user.email)
+    );
+    if (emailResult.isErr()) {
+      console.warn("Failed to send welcome email:", emailResult.error);
+    }
+    
+    return Result.ok(user);
+  });
+};
+```
+
+### Batch Processing with Rollback
+
+```typescript
+const processBatch = async (
+  items: Item[]
+): Promise<Result<void, BatchError>> => {
+  return Result.gen(async function* () {
+    const processed: ProcessedItem[] = [];
+    
+    try {
+      for (const item of items) {
+        const validated = yield* validateItem(item);
+        const result = yield* Result.await(processItem(validated));
+        processed.push(result);
+      }
+      
+      // Commit all
+      yield* Result.await(commitBatch(processed));
+      return Result.ok(undefined);
+    } catch (error) {
+      // Rollback processed items
+      for (const item of processed.reverse()) {
+        await rollbackItem(item).catch(console.error);
+      }
+      throw error;
+    }
+  });
+};
+```
+
+### Multi-Step Workflow
+
+```typescript
+const processOrderWorkflow = async (
+  orderId: string
+): Promise<Result<Receipt, WorkflowError>> => {
+  return Result.gen(async function* () {
+    // Step 1: Fetch order
+    console.log("[1/5] Fetching order...");
+    const order = yield* Result.await(fetchOrder(orderId));
+    
+    // Step 2: Validate inventory
+    console.log("[2/5] Validating inventory...");
+    const inventory = yield* Result.await(checkInventory(order.items));
+    
+    // Step 3: Reserve items
+    console.log("[3/5] Reserving items...");
+    using reservation = yield* Result.await(reserveItems(inventory));
+    
+    // Step 4: Process payment
+    console.log("[4/5] Processing payment...");
+    const payment = yield* Result.await(processPayment(order.total));
+    
+    // Step 5: Generate receipt
+    console.log("[5/5] Generating receipt...");
+    const receipt = yield* generateReceipt(order, payment);
+    
+    console.log("✓ Order processed successfully");
+    return Result.ok(receipt);
+  });
+};
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always return Result from generator">
+    The generator body must return `Result.ok()` or `Result.err()`:
+    
+    ```typescript
+    // Good
+    Result.gen(function* () {
+      const x = yield* getX();
+      return Result.ok(x * 2);
+    });
+    
+    // Bad: returns number directly
+    Result.gen(function* () {
+      const x = yield* getX();
+      return x * 2; // Panic!
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Don't throw in generators">
+    Throwing before any `yield*` will cause a Panic:
+    
+    ```typescript
+    // Bad: throws before yielding
+    Result.gen(function* () {
+      throw new Error("oops"); // Panic!
+    });
+    
+    // Good: return error
+    Result.gen(function* () {
+      return Result.err(new MyError({ ... }));
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Ensure finally blocks don't throw">
+    Wrap cleanup in try-catch:
+    
+    ```typescript
+    Result.gen(function* () {
+      try {
+        const resource = yield* acquire();
+        return Result.ok(resource);
+      } finally {
+        try {
+          cleanup();
+        } catch (e) {
+          console.error("Cleanup failed:", e);
+        }
+      }
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Use Result.await for promises">
+    Always wrap `Promise<Result>` with `Result.await()`:
+    
+    ```typescript
+    // Good
+    const user = yield* Result.await(fetchUser(id));
+    
+    // Bad: yields Promise, not Result
+    const user = yield* fetchUser(id); // Type error
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Summary
+
+Use `Result.gen()` when you need:
+
+- **Imperative style** - Code that reads like normal sync/async code
+- **Multiple values** - Access to intermediate results
+- **Complex control flow** - Conditions, loops, early returns
+- **Resource cleanup** - `finally` blocks or `using` declarations
+- **Error union** - Automatic inference of all possible error types
+
+Avoid `Result.gen()` when:
+
+- Simple linear transformations (use `map()`/`andThen()`)
+- Purely functional composition (use pipeable API)
+- No intermediate values needed
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Creating Results" icon="plus" href="/core/creating-results">
+    Learn how to create Result instances with ok, err, try, and tryPromise
+  </Card>
+  
+  <Card title="Error Handling" icon="triangle-exclamation" href="/core/error-handling">
+    Master TaggedError and exhaustive error matching
+  </Card>
+</CardGroup>

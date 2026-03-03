@@ -1,0 +1,385 @@
+---
+title: UnhandledException
+description: Wrapper for exceptions caught by Result.try and Result.tryPromise
+---
+
+## Overview
+
+`UnhandledException` wraps exceptions that are caught by `Result.try()` or `Result.tryPromise()` when no custom catch handler is provided. It automatically derives a descriptive error message from the caught exception.
+
+This error type represents **expected exceptions** that are handled gracefully by the Result abstraction, as opposed to [Panic](/api/panic) which represents unrecoverable defects.
+
+## Class Definition
+
+```typescript
+class UnhandledException extends TaggedError("UnhandledException")<{
+  message: string;
+  cause: unknown;
+}>() {
+  constructor(args: { cause: unknown }) {
+    const message =
+      args.cause instanceof Error
+        ? `Unhandled exception: ${args.cause.message}`
+        : `Unhandled exception: ${String(args.cause)}`;
+    super({ message, cause: args.cause });
+  }
+}
+```
+
+## Properties
+
+<ResponseField name="_tag" type="'UnhandledException'" required>
+  Discriminator tag, always `"UnhandledException"`.
+</ResponseField>
+
+<ResponseField name="message" type="string" required>
+  Automatically derived message:
+  - If `cause` is an Error: `"Unhandled exception: <error.message>"`
+  - Otherwise: `"Unhandled exception: <String(cause)>"`
+</ResponseField>
+
+<ResponseField name="cause" type="unknown" required>
+  The original exception that was caught. Can be any value (Error, string, object, etc.).
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Error name, set to `"UnhandledException"`.
+</ResponseField>
+
+<ResponseField name="stack" type="string | undefined">
+  Stack trace. If `cause` is an Error, includes "Caused by:" chain with the original stack.
+</ResponseField>
+
+## Constructor
+
+```typescript
+new UnhandledException({ cause: unknown })
+```
+
+<ParamField path="cause" type="unknown" required>
+  The exception that was caught. Can be any value.
+</ParamField>
+
+### Examples
+
+```typescript
+// With Error cause
+const err1 = new UnhandledException({ cause: new Error("Network timeout") });
+console.log(err1.message); // "Unhandled exception: Network timeout"
+
+// With string cause
+const err2 = new UnhandledException({ cause: "Something went wrong" });
+console.log(err2.message); // "Unhandled exception: Something went wrong"
+
+// With null cause
+const err3 = new UnhandledException({ cause: null });
+console.log(err3.message); // "Unhandled exception: null"
+```
+
+## When It's Created
+
+### Result.try()
+
+When `Result.try()` is called without a custom catch handler:
+
+```typescript
+import { Result } from "better-result";
+
+const result = Result.try(() => {
+  throw new Error("Parse failed");
+});
+
+if (Result.isError(result)) {
+  console.log(result.error); // UnhandledException
+  console.log(result.error._tag); // "UnhandledException"
+  console.log(result.error.message); // "Unhandled exception: Parse failed"
+  console.log(result.error.cause); // Error("Parse failed")
+}
+```
+
+### Result.tryPromise()
+
+When `Result.tryPromise()` is called without a custom catch handler:
+
+```typescript
+const result = await Result.tryPromise(async () => {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return response.json();
+});
+
+if (Result.isError(result)) {
+  console.log(result.error); // UnhandledException
+  console.log(result.error.cause); // Original Error
+}
+```
+
+## Usage Patterns
+
+### Basic Error Handling
+
+```typescript
+function parseJSON(text: string): Result<unknown, UnhandledException> {
+  return Result.try(() => JSON.parse(text));
+}
+
+const result = parseJSON('{invalid}');
+
+if (Result.isError(result)) {
+  console.error("Failed to parse JSON:", result.error.message);
+  // Log original cause for debugging
+  console.debug("Cause:", result.error.cause);
+}
+```
+
+### Type Guard
+
+Check if an error is an UnhandledException:
+
+```typescript
+import { UnhandledException } from "better-result";
+
+function handleError(error: unknown) {
+  if (UnhandledException.is(error)) {
+    console.log("Caught exception:", error.cause);
+  }
+}
+```
+
+### Accessing the Original Exception
+
+```typescript
+const result = Result.try(() => {
+  throw new TypeError("Expected string");
+});
+
+if (Result.isError(result)) {
+  const cause = result.error.cause;
+  
+  if (cause instanceof TypeError) {
+    console.log("Type error:", cause.message);
+  } else if (cause instanceof SyntaxError) {
+    console.log("Syntax error:", cause.message);
+  }
+}
+```
+
+### Pattern Matching
+
+```typescript
+import { matchError, UnhandledException } from "better-result";
+
+type AppError = NotFoundError | ValidationError | UnhandledException;
+
+function handleError(error: AppError): string {
+  return matchError(error, {
+    NotFoundError: (e) => `Not found: ${e.id}`,
+    ValidationError: (e) => `Invalid ${e.field}`,
+    UnhandledException: (e) => `Unexpected error: ${e.message}`
+  });
+}
+```
+
+## Avoiding UnhandledException
+
+Use custom catch handlers to convert exceptions into domain-specific errors:
+
+### With Result.try()
+
+```typescript
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+  input: string;
+}>() {}
+
+function parseJSON(text: string): Result<unknown, ParseError> {
+  return Result.try({
+    try: () => JSON.parse(text),
+    catch: (cause) => new ParseError({
+      message: cause instanceof Error ? cause.message : String(cause),
+      input: text
+    })
+  });
+}
+
+// Now returns ParseError instead of UnhandledException
+const result = parseJSON('{invalid}');
+```
+
+### With Result.tryPromise()
+
+```typescript
+class NetworkError extends TaggedError("NetworkError")<{
+  message: string;
+  url: string;
+  status?: number;
+}>() {}
+
+async function fetchData(url: string): Promise<Result<Data, NetworkError>> {
+  return Result.tryPromise({
+    try: async () => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+    catch: (cause) => new NetworkError({
+      message: cause instanceof Error ? cause.message : String(cause),
+      url
+    })
+  });
+}
+```
+
+## Comparison with Panic
+
+| Aspect | UnhandledException | Panic |
+|--------|-------------------|-------|
+| **Created by** | `Result.try` / `tryPromise` without catch handler | User code throwing inside combinators |
+| **Represents** | Expected exception (handled gracefully) | Unrecoverable defect (bug) |
+| **Should catch?** | ✅ Yes - wrap in Result | ❌ No - let it crash |
+| **When to use** | Wrapping throwing code you expect to fail | Never - should be fixed |
+| **Stack trace** | Original exception + wrapper | Callback/cleanup location |
+
+<CodeGroup>
+```typescript UnhandledException (Expected)
+// This is fine - exception is handled
+const result = Result.try(() => {
+  throw new Error("expected failure");
+});
+// Returns: Err(UnhandledException)
+```
+
+```typescript Panic (Bug)
+// This is a bug - should not throw in map
+const result = Result.ok(1).map(() => {
+  throw new Error("unexpected");
+});
+// Throws: Panic - indicates defect in code
+```
+</CodeGroup>
+
+## Error Message Format
+
+The message is automatically formatted based on the cause type:
+
+```typescript
+// Error cause
+new UnhandledException({ cause: new Error("timeout") });
+// message: "Unhandled exception: timeout"
+
+// String cause
+new UnhandledException({ cause: "connection failed" });
+// message: "Unhandled exception: connection failed"
+
+// Number cause
+new UnhandledException({ cause: 404 });
+// message: "Unhandled exception: 404"
+
+// Object cause
+new UnhandledException({ cause: { code: "ERR" } });
+// message: "Unhandled exception: [object Object]"
+
+// null cause
+new UnhandledException({ cause: null });
+// message: "Unhandled exception: null"
+```
+
+## Stack Trace Chaining
+
+When the cause is an Error, stack traces are chained:
+
+```typescript
+const result = Result.try(() => {
+  const inner = new Error("root cause");
+  throw inner;
+});
+
+if (Result.isError(result)) {
+  console.log(result.error.stack);
+  // UnhandledException: Unhandled exception: root cause
+  //     at ...
+  // Caused by:
+  //   Error: root cause
+  //     at ...
+}
+```
+
+## JSON Serialization
+
+```typescript
+const error = new UnhandledException({
+  cause: new Error("Network timeout")
+});
+
+const json = error.toJSON();
+// {
+//   _tag: "UnhandledException",
+//   name: "UnhandledException",
+//   message: "Unhandled exception: Network timeout",
+//   cause: {
+//     name: "Error",
+//     message: "Network timeout",
+//     stack: "..."
+//   },
+//   stack: "..."
+// }
+
+console.log(JSON.stringify(error));
+```
+
+## Best Practices
+
+1. **Prefer custom catch handlers** for better error types:
+   ```typescript
+   // ❌ Generic UnhandledException
+   Result.try(() => riskyOperation());
+   
+   // ✅ Domain-specific error
+   Result.try({
+     try: () => riskyOperation(),
+     catch: (e) => new OperationError({ cause: e })
+   });
+   ```
+
+2. **Use for quick prototyping**, refine later:
+   ```typescript
+   // Start with this
+   const result = Result.try(() => JSON.parse(text));
+   
+   // Refine to this
+   const result = Result.try({
+     try: () => JSON.parse(text),
+     catch: (e) => new ParseError({ message: String(e), input: text })
+   });
+   ```
+
+3. **Log the cause** for debugging:
+   ```typescript
+   if (Result.isError(result) && UnhandledException.is(result.error)) {
+     logger.error('Unhandled exception', {
+       message: result.error.message,
+       cause: result.error.cause,
+       stack: result.error.stack
+     });
+   }
+   ```
+
+4. **Check cause type** when handling:
+   ```typescript
+   if (Result.isError(result)) {
+     const { cause } = result.error;
+     
+     if (cause instanceof SyntaxError) {
+       // Handle syntax errors specially
+     } else if (cause instanceof TypeError) {
+       // Handle type errors specially
+     }
+   }
+   ```
+
+## See Also
+
+- [Result.try](/api/result#try) - Catching synchronous exceptions
+- [Result.tryPromise](/api/result#trypromise) - Catching async exceptions
+- [Panic](/api/panic) - Unrecoverable errors (defects)
+- [TaggedError](/api/tagged-error) - Base class for UnhandledException

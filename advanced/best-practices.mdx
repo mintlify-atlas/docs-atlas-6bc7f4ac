@@ -1,0 +1,673 @@
+---
+title: "Best Practices"
+description: "Patterns, conventions, and guidelines for using better-result effectively"
+---
+
+## When to Use Result vs Throwing
+
+Choosing between Result types and throwing exceptions is a fundamental design decision.
+
+### Use Result When:
+
+<AccordionGroup>
+  <Accordion title="Errors are part of normal flow" icon="code-branch">
+    Expected failures that are part of the business logic should return Result:
+
+    ```typescript
+    class NotFoundError extends TaggedError('NotFoundError')<{
+      id: string;
+      message: string;
+    }>() {}
+
+    // Good: Not found is an expected outcome
+    const findUser = (id: string): Result<User, NotFoundError> => {
+      const user = database.get(id);
+      
+      if (!user) {
+        return Result.err(new NotFoundError({ 
+          id, 
+          message: `User ${id} not found` 
+        }));
+      }
+      
+      return Result.ok(user);
+    };
+    ```
+  </Accordion>
+
+  <Accordion title="You want exhaustive error handling" icon="check-double">
+    Result forces callers to handle errors explicitly:
+
+    ```typescript
+    const result = parseConfig(file);
+    
+    // TypeScript requires handling the error case
+    if (Result.isError(result)) {
+      console.error('Config parse failed:', result.error);
+      return;
+    }
+    
+    // Type is narrowed to Ok<Config>
+    const config = result.value;
+    ```
+  </Accordion>
+
+  <Accordion title="Errors should compose" icon="layer-group">
+    Use Result when chaining operations with different error types:
+
+    ```typescript
+    const processUser = (id: string) => Result.gen(function* () {
+      const user = yield* fetchUser(id);        // Err: NotFoundError
+      const validated = yield* validate(user);  // Err: ValidationError
+      const saved = yield* save(validated);     // Err: DbError
+      
+      return Result.ok(saved);
+    });
+    // Returns: Result<User, NotFoundError | ValidationError | DbError>
+    ```
+  </Accordion>
+
+  <Accordion title="Type safety is critical" icon="shield">
+    Result provides compile-time guarantees about error types:
+
+    ```typescript
+    type AppError = NotFoundError | ValidationError | AuthError;
+    
+    const handleError = (error: AppError) => {
+      // TypeScript ensures all error types are handled
+      return matchError(error, {
+        NotFoundError: (e) => `Not found: ${e.id}`,
+        ValidationError: (e) => `Invalid ${e.field}`,
+        AuthError: (e) => `Unauthorized: ${e.message}`
+      });
+    };
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Use Throwing When:
+
+<AccordionGroup>
+  <Accordion title="Errors are truly exceptional" icon="triangle-exclamation">
+    Unrecoverable errors that indicate bugs or system failures:
+
+    ```typescript
+    // Good: Panic for programmer errors
+    if (!config) {
+      throw panic('Config must be initialized before use');
+    }
+    
+    // Good: Throw for corrupted state
+    if (balance < 0) {
+      throw new Error('Invariant violation: negative balance');
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Integrating with throwing libraries" icon="plug">
+    Wrap throwing third-party code with Result.try or Result.tryPromise:
+
+    ```typescript
+    // Third-party library throws
+    import { parseXML } from 'some-xml-library';
+    
+    const parseConfig = (xml: string): Result<Config, ParseError> => {
+      return Result.try(
+        {
+          try: () => parseXML(xml),
+          catch: (e) => new ParseError({ 
+            message: String(e),
+            cause: e 
+          })
+        }
+      );
+    };
+    ```
+  </Accordion>
+
+  <Accordion title="Performance is critical" icon="gauge-high">
+    In tight loops, throwing can be faster than Result for the success path:
+
+    ```typescript
+    // Hot path: use throwing for performance
+    const parseNumbers = (input: string[]): number[] => {
+      return input.map(s => {
+        const num = parseFloat(s);
+        if (isNaN(num)) {
+          throw new Error(`Invalid number: ${s}`);
+        }
+        return num;
+      });
+    };
+    
+    // Wrap hot path in Result at boundary
+    const safeParseNumbers = (input: string[]): Result<number[], Error> => {
+      return Result.try(() => parseNumbers(input));
+    };
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Error Type Design Patterns
+
+### Discriminated Error Unions
+
+Use TaggedError to create discriminated unions:
+
+```typescript
+// Define error types
+class NetworkError extends TaggedError('NetworkError')<{
+  message: string;
+  url: string;
+  status?: number;
+}>() {}
+
+class TimeoutError extends TaggedError('TimeoutError')<{
+  message: string;
+  timeoutMs: number;
+}>() {}
+
+class ParseError extends TaggedError('ParseError')<{
+  message: string;
+  position: number;
+}>() {}
+
+// Union type
+type ApiError = NetworkError | TimeoutError | ParseError;
+
+// Exhaustive matching
+const handleApiError = (error: ApiError): string => {
+  return matchError(error, {
+    NetworkError: (e) => `Network failed (${e.status}): ${e.url}`,
+    TimeoutError: (e) => `Timeout after ${e.timeoutMs}ms`,
+    ParseError: (e) => `Parse error at position ${e.position}`
+  });
+};
+```
+
+### Error Hierarchies
+
+Group related errors under a common type:
+
+```typescript
+// Base types
+class ValidationError extends TaggedError('ValidationError')<{
+  message: string;
+  field: string;
+}>() {}
+
+class DbError extends TaggedError('DbError')<{
+  message: string;
+  operation: 'read' | 'write' | 'delete';
+}>() {}
+
+class AuthError extends TaggedError('AuthError')<{
+  message: string;
+  reason: 'expired' | 'invalid' | 'missing';
+}>() {}
+
+// Application-wide error union
+type AppError = ValidationError | DbError | AuthError;
+
+// Domain-specific subsets
+type UserManagementError = ValidationError | DbError;
+type AuthenticationError = AuthError | DbError;
+```
+
+### Error Context Enrichment
+
+Add context as errors propagate:
+
+```typescript
+class EnrichedError extends TaggedError('EnrichedError')<{
+  message: string;
+  context: Record<string, unknown>;
+  cause?: unknown;
+}>() {}
+
+const withContext = <T, E>(
+  result: Result<T, E>,
+  context: Record<string, unknown>
+): Result<T, EnrichedError> => {
+  return result.mapError(error => 
+    new EnrichedError({
+      message: String(error),
+      context,
+      cause: error
+    })
+  );
+};
+
+// Usage
+const processOrder = (orderId: string) => Result.gen(function* () {
+  const order = yield* withContext(
+    fetchOrder(orderId),
+    { operation: 'fetch_order', orderId }
+  );
+  
+  const payment = yield* withContext(
+    processPayment(order),
+    { operation: 'process_payment', orderId, amount: order.total }
+  );
+  
+  return Result.ok({ order, payment });
+});
+```
+
+## Performance Considerations
+
+### Memory Overhead
+
+Result creates wrapper objects. In tight loops, this can add overhead:
+
+```typescript
+// ❌ Less efficient: Creates Result for each element
+const parseAll = (items: string[]): Result<number[], ParseError> => {
+  return Result.gen(function* () {
+    const numbers: number[] = [];
+    
+    for (const item of items) {
+      const num = yield* parseNumber(item); // Creates Result per item
+      numbers.push(num);
+    }
+    
+    return Result.ok(numbers);
+  });
+};
+
+// ✅ More efficient: Parse first, then wrap in Result
+const parseAll = (items: string[]): Result<number[], ParseError> => {
+  return Result.try({
+    try: () => {
+      return items.map(item => {
+        const num = parseFloat(item);
+        if (isNaN(num)) {
+          throw new ParseError({ message: `Invalid: ${item}`, value: item });
+        }
+        return num;
+      });
+    },
+    catch: (e) => e as ParseError
+  });
+};
+```
+
+### Short-Circuit Efficiency
+
+Result.gen short-circuits on first error, avoiding unnecessary work:
+
+```typescript
+const process = (id: string) => Result.gen(function* () {
+  const user = yield* fetchUser(id);        // Stop here if user not found
+  const posts = yield* fetchPosts(user.id); // Only runs if user found
+  const tags = yield* fetchTags(posts);     // Only runs if posts found
+  
+  return Result.ok({ user, posts, tags });
+});
+```
+
+### Avoid Premature Unwrapping
+
+Keep values in Result context as long as possible:
+
+```typescript
+// ❌ Bad: Unwrap too early
+const processUser = (id: string) => {
+  const userResult = fetchUser(id);
+  if (Result.isError(userResult)) {
+    return Result.err(userResult.error);
+  }
+  const user = userResult.value; // Unwrapped
+  
+  const postsResult = fetchPosts(user.id);
+  if (Result.isError(postsResult)) {
+    return Result.err(postsResult.error);
+  }
+  const posts = postsResult.value; // Unwrapped
+  
+  return Result.ok({ user, posts });
+};
+
+// ✅ Good: Keep in Result context
+const processUser = (id: string) => Result.gen(function* () {
+  const user = yield* fetchUser(id);
+  const posts = yield* fetchPosts(user.id);
+  
+  return Result.ok({ user, posts });
+});
+```
+
+## Type Safety Tips
+
+### Never Use any with Result
+
+Explicitly type error unions:
+
+```typescript
+// ❌ Bad: Loses type safety
+const fetchData = (): Result<Data, any> => {
+  // ...
+};
+
+// ✅ Good: Explicit error types
+type FetchError = NetworkError | TimeoutError | ParseError;
+
+const fetchData = (): Result<Data, FetchError> => {
+  // ...
+};
+```
+
+### Use InferOk and InferErr
+
+Extract types from Result types:
+
+```typescript
+import type { InferOk, InferErr } from 'better-result';
+
+type UserResult = Result<User, NotFoundError | DbError>;
+
+type UserType = InferOk<UserResult>; // User
+type UserErrorType = InferErr<UserResult>; // NotFoundError | DbError
+
+const handleUserResult = (result: UserResult) => {
+  result.match({
+    ok: (user: UserType) => console.log(user),
+    err: (error: UserErrorType) => console.error(error)
+  });
+};
+```
+
+### Constrain Generic Functions
+
+Use type constraints for generic Result functions:
+
+```typescript
+import type { Result } from 'better-result';
+
+// Generic retry function with proper constraints
+const retryable = <T, E extends { retryable?: boolean }>(
+  fn: () => Result<T, E>,
+  maxAttempts: number = 3
+): Result<T, E> => {
+  let result = fn();
+  let attempts = 1;
+  
+  while (
+    Result.isError(result) && 
+    result.error.retryable && 
+    attempts < maxAttempts
+  ) {
+    result = fn();
+    attempts++;
+  }
+  
+  return result;
+};
+```
+
+## Testing Strategies
+
+### Test Both Paths
+
+Always test success and error paths:
+
+```typescript
+import { describe, it, expect } from 'bun:test';
+
+describe('fetchUser', () => {
+  it('returns Ok when user exists', () => {
+    const result = fetchUser('existing-id');
+    
+    expect(Result.isOk(result)).toBe(true);
+    if (Result.isOk(result)) {
+      expect(result.value.id).toBe('existing-id');
+    }
+  });
+
+  it('returns NotFoundError when user does not exist', () => {
+    const result = fetchUser('missing-id');
+    
+    expect(Result.isError(result)).toBe(true);
+    if (Result.isError(result)) {
+      expect(NotFoundError.is(result.error)).toBe(true);
+      expect(result.error.id).toBe('missing-id');
+    }
+  });
+});
+```
+
+### Use Type Guards in Tests
+
+```typescript
+it('validates error types', () => {
+  const result = validateInput({ invalid: 'data' });
+  
+  expect(Result.isError(result)).toBe(true);
+  
+  if (Result.isError(result)) {
+    // Narrow to specific error type
+    expect(ValidationError.is(result.error)).toBe(true);
+    
+    if (ValidationError.is(result.error)) {
+      expect(result.error.field).toBe('name');
+    }
+  }
+});
+```
+
+### Test Error Composition
+
+Verify error unions in composed operations:
+
+```typescript
+it('composes multiple error types', () => {
+  const result = processOrder('invalid-id');
+  
+  // Result type is union of all possible errors
+  if (Result.isError(result)) {
+    const handled = matchError(result.error, {
+      NotFoundError: (e) => `Order ${e.id} not found`,
+      ValidationError: (e) => `Invalid ${e.field}`,
+      PaymentError: (e) => `Payment failed: ${e.reason}`
+    });
+    
+    expect(handled).toBeTruthy();
+  }
+});
+```
+
+### Mock with Result
+
+Create test fixtures returning Results:
+
+```typescript
+const mockFetchUser = (id: string): Result<User, NotFoundError> => {
+  if (id === 'test-user') {
+    return Result.ok({ id, name: 'Test User', email: 'test@example.com' });
+  }
+  
+  return Result.err(new NotFoundError({ 
+    id, 
+    message: `User ${id} not found` 
+  }));
+};
+
+it('processes user data', () => {
+  const result = Result.gen(function* () {
+    const user = yield* mockFetchUser('test-user');
+    return Result.ok(user.name.toUpperCase());
+  });
+  
+  expect(result.unwrap()).toBe('TEST USER');
+});
+```
+
+## Common Patterns
+
+### Optional to Result
+
+Convert nullable values to Results:
+
+```typescript
+const fromNullable = <T, E>(
+  value: T | null | undefined,
+  error: E
+): Result<T, E> => {
+  return value !== null && value !== undefined 
+    ? Result.ok(value)
+    : Result.err(error);
+};
+
+// Usage
+const user = database.get(id);
+const result = fromNullable(
+  user,
+  new NotFoundError({ id, message: 'User not found' })
+);
+```
+
+### Result to Promise
+
+Convert Result to Promise for async contexts:
+
+```typescript
+const toPromise = <T, E extends Error>(result: Result<T, E>): Promise<T> => {
+  return result.match({
+    ok: (value) => Promise.resolve(value),
+    err: (error) => Promise.reject(error)
+  });
+};
+
+// Usage with async/await
+try {
+  const user = await toPromise(fetchUser(id));
+  console.log(user);
+} catch (error) {
+  if (NotFoundError.is(error)) {
+    console.log('User not found');
+  }
+}
+```
+
+### Collect Results
+
+Gather multiple Results into a single Result:
+
+```typescript
+const collect = <T, E>(
+  results: Result<T, E>[]
+): Result<T[], E> => {
+  return Result.gen(function* () {
+    const values: T[] = [];
+    
+    for (const result of results) {
+      const value = yield* result;
+      values.push(value);
+    }
+    
+    return Result.ok(values);
+  });
+};
+
+// Usage
+const userIds = ['1', '2', '3'];
+const results = userIds.map(fetchUser);
+const collected = collect(results);
+
+if (Result.isOk(collected)) {
+  console.log('All users:', collected.value);
+} else {
+  console.log('First error:', collected.error);
+}
+```
+
+## Anti-Patterns to Avoid
+
+<Warning>
+  **Don't use Result.unwrap() without checking**: This defeats the purpose of Result. Always use type guards or pattern matching.
+</Warning>
+
+```typescript
+// ❌ Bad: Unchecked unwrap
+const user = fetchUser(id).unwrap(); // Throws if Err
+
+// ✅ Good: Check before unwrap
+const result = fetchUser(id);
+if (Result.isOk(result)) {
+  const user = result.unwrap();
+}
+
+// ✅ Better: Use match
+const userName = fetchUser(id).match({
+  ok: (user) => user.name,
+  err: () => 'Unknown'
+});
+```
+
+<Warning>
+  **Don't mix Result and throwing in the same function**: Choose one error handling strategy per function.
+</Warning>
+
+```typescript
+// ❌ Bad: Mixed error handling
+const processUser = (id: string): Result<User, NotFoundError> => {
+  if (!id) {
+    throw new Error('ID required'); // Throws instead of returning Err
+  }
+  
+  return fetchUser(id);
+};
+
+// ✅ Good: Consistent error handling
+const processUser = (id: string): Result<User, ValidationError | NotFoundError> => {
+  if (!id) {
+    return Result.err(new ValidationError({ 
+      field: 'id',
+      message: 'ID required' 
+    }));
+  }
+  
+  return fetchUser(id);
+};
+```
+
+<Warning>
+  **Don't ignore errors with void operators**: This silences errors without handling them.
+</Warning>
+
+```typescript
+// ❌ Bad: Ignored errors
+void fetchUser(id);
+
+// ✅ Good: Handle or log errors
+const result = fetchUser(id);
+if (Result.isError(result)) {
+  console.error('Failed to fetch user:', result.error);
+}
+```
+
+## Migration Strategy
+
+Introduce Result gradually into existing codebases:
+
+<Steps>
+  <Step title="Start at the boundaries">
+    Convert external API calls and I/O operations to use Result first.
+  </Step>
+  <Step title="Wrap throwing code">
+    Use `Result.try` and `Result.tryPromise` to wrap existing throwing functions.
+  </Step>
+  <Step title="Define error types">
+    Create TaggedError classes for your domain errors.
+  </Step>
+  <Step title="Convert layer by layer">
+    Gradually convert internal functions to return Result, starting from leaf functions.
+  </Step>
+  <Step title="Update call sites">
+    Replace try-catch with Result combinators and pattern matching.
+  </Step>
+</Steps>
+
+<Tip>
+  You can have throwing code and Result-based code coexist during migration. Use `Result.try` at the boundaries to convert between the two styles.
+</Tip>

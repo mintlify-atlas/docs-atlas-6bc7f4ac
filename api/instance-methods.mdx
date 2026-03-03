@@ -1,0 +1,553 @@
+---
+title: "Instance Methods"
+description: "Methods available on Ok and Err instances"
+---
+
+## Type Guards
+
+### isOk()
+
+Returns `true` if the result is Ok, narrowing the type in TypeScript.
+
+```typescript
+isOk(): this is Ok<A, E>
+```
+
+#### Returns
+
+<ResponseField name="result" type="boolean">
+  `true` for Ok instances, `false` for Err instances
+</ResponseField>
+
+#### Example
+
+```typescript
+const result: Result<number, string> = Result.ok(42);
+
+if (result.isOk()) {
+  // TypeScript narrows to Ok<number, string>
+  console.log(result.value); // 42
+}
+```
+
+### isErr()
+
+Returns `true` if the result is Err, narrowing the type in TypeScript.
+
+```typescript
+isErr(): this is Err<T, E>
+```
+
+#### Returns
+
+<ResponseField name="result" type="boolean">
+  `true` for Err instances, `false` for Ok instances
+</ResponseField>
+
+#### Example
+
+```typescript
+const result: Result<number, string> = Result.err("failed");
+
+if (result.isErr()) {
+  // TypeScript narrows to Err<number, string>
+  console.log(result.error); // "failed"
+}
+```
+
+## Transformation
+
+### map()
+
+Transforms the success value if Ok, passes through if Err.
+
+```typescript
+map<B>(fn: (a: A) => B): Result<B, E>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(a: A) => B" required>
+  Transformation function applied to the success value
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<B, E>">
+  Ok with transformed value if original was Ok, otherwise Err unchanged
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Applies `fn` to the value, returns new Ok with result
+- **On Err**: Returns self unchanged (no-op)
+- **Throws**: `Panic` if `fn` throws
+
+#### Examples
+
+```typescript
+// Success case
+const result = Result.ok(2).map(x => x * 2);
+// Ok(4)
+
+// Error case
+const error = Result.err<number, string>("failed").map(x => x * 2);
+// Err("failed") - unchanged
+
+// Chaining
+Result.ok("hello")
+  .map(s => s.toUpperCase())
+  .map(s => s.length);
+// Ok(5)
+```
+
+### mapError()
+
+Transforms the error value if Err, passes through if Ok.
+
+```typescript
+mapError<E2>(fn: (e: E) => E2): Result<A, E2>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(e: E) => E2" required>
+  Transformation function applied to the error value
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<A, E2>">
+  Err with transformed error if original was Err, otherwise Ok unchanged
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Returns self with updated phantom error type (no-op at runtime)
+- **On Err**: Applies `fn` to the error, returns new Err with result
+- **Throws**: `Panic` if `fn` throws
+
+#### Examples
+
+```typescript
+// Error case
+const result = Result.err("not found").mapError(msg => new Error(msg));
+// Err(Error("not found"))
+
+// Success case
+const success = Result.ok<number, string>(42).mapError(msg => new Error(msg));
+// Ok(42) - unchanged
+
+// Normalizing error types
+Result.gen(function* () {
+  const a = yield* getA(); // Result<A, ErrorA>
+  const b = yield* getB(); // Result<B, ErrorB>
+  return Result.ok({ a, b });
+}).mapError(e => new UnifiedError(e._tag));
+// Result<{a, b}, UnifiedError>
+```
+
+## Chaining
+
+### andThen()
+
+Chains a Result-returning function on success (also known as `flatMap` or `bind`).
+
+```typescript
+andThen<B, E2>(fn: (a: A) => Result<B, E2>): Result<B, E | E2>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(a: A) => Result<B, E2>" required>
+  Function that returns a new Result
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<B, E | E2>">
+  The Result returned by `fn` if original was Ok, otherwise Err unchanged with widened error type
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Calls `fn` with the value, returns its Result
+- **On Err**: Returns self with widened error type (no-op)
+- **Throws**: `Panic` if `fn` throws
+
+#### Examples
+
+```typescript
+// Success case
+const result = Result.ok(2).andThen(x => 
+  x > 0 ? Result.ok(x * 2) : Result.err("negative")
+);
+// Ok(4)
+
+// Short-circuit on error
+const error = Result.err<number, string>("failed").andThen(x => 
+  Result.ok(x * 2)
+);
+// Err("failed")
+
+// Chaining multiple operations
+Result.ok(5)
+  .andThen(x => x > 0 ? Result.ok(x) : Result.err("non-positive"))
+  .andThen(x => x < 10 ? Result.ok(x * 2) : Result.err("too large"));
+// Ok(10)
+```
+
+### andThenAsync()
+
+Chains an async Result-returning function on success.
+
+```typescript
+andThenAsync<B, E2>(
+  fn: (a: A) => Promise<Result<B, E2>>
+): Promise<Result<B, E | E2>>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(a: A) => Promise<Result<B, E2>>" required>
+  Async function that returns a Promise of Result
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Promise<Result<B, E | E2>>">
+  Promise of the Result returned by `fn` if original was Ok, otherwise Err unchanged
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Awaits `fn` with the value, returns its Result
+- **On Err**: Returns Promise of self with widened error type (no-op)
+- **Throws**: `Panic` if `fn` throws synchronously or rejects
+
+#### Examples
+
+```typescript
+// Async operation
+const result = await Result.ok(1).andThenAsync(async (id) => {
+  const user = await fetchUser(id);
+  return Result.ok(user);
+});
+
+// Chaining async operations
+await Result.ok(userId)
+  .andThenAsync(async (id) => {
+    const user = await db.getUser(id);
+    return user ? Result.ok(user) : Result.err("not found");
+  })
+  .then(result => result.andThenAsync(async (user) => {
+    const profile = await api.getProfile(user.id);
+    return Result.ok({ user, profile });
+  }));
+```
+
+## Pattern Matching
+
+### match()
+
+Pattern matches on the Result, executing the appropriate handler.
+
+```typescript
+match<T>(handlers: {
+  ok: (a: A) => T;
+  err: (e: E) => T;
+}): T
+```
+
+#### Parameters
+
+<ParamField path="handlers" type="object" required>
+  Object with `ok` and `err` handler functions
+  
+  <ParamField path="handlers.ok" type="(a: A) => T" required>
+    Handler called if Result is Ok, receives the value
+  </ParamField>
+  
+  <ParamField path="handlers.err" type="(e: E) => T" required>
+    Handler called if Result is Err, receives the error
+  </ParamField>
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="T">
+  The return value of the executed handler
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Executes `handlers.ok` with the value
+- **On Err**: Executes `handlers.err` with the error
+- **Throws**: `Panic` if handler throws
+
+#### Examples
+
+```typescript
+// Basic matching
+const result: Result<number, string> = Result.ok(42);
+
+const output = result.match({
+  ok: (value) => `Success: ${value}`,
+  err: (error) => `Error: ${error}`,
+});
+// "Success: 42"
+
+// Converting to HTTP response
+function toResponse(result: Result<Data, AppError>) {
+  return result.match({
+    ok: (data) => ({ status: 200, body: data }),
+    err: (error) => ({ status: error.statusCode, body: { error: error.message } }),
+  });
+}
+
+// Both handlers must return same type
+const num = result.match({
+  ok: (n) => n,
+  err: () => 0, // Fallback value
+});
+```
+
+## Unwrapping
+
+### unwrap()
+
+Extracts the value from Ok or throws an error.
+
+```typescript
+unwrap(message?: string): A
+```
+
+#### Parameters
+
+<ParamField path="message" type="string" optional>
+  Custom error message if called on Err
+</ParamField>
+
+#### Returns
+
+<ResponseField name="value" type="A">
+  The success value if Ok
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Returns the value
+- **On Err**: Throws `Panic` with optional custom message
+- **Throws**: Always throws on Err
+
+<Warning>
+Only use `unwrap()` when you're certain the Result is Ok, or in contexts where throwing is acceptable (e.g., tests). For production code, prefer `unwrapOr()` or `match()`.
+</Warning>
+
+#### Examples
+
+```typescript
+// Success case
+const value = Result.ok(42).unwrap();
+// 42
+
+// Error case - throws
+Result.err("failed").unwrap();
+// throws Panic: "Unwrap called on Err: failed"
+
+// With custom message
+Result.err("failed").unwrap("Custom error message");
+// throws Panic: "Custom error message"
+
+// Safe usage in tests
+test("should return user", () => {
+  const result = getUser(id);
+  const user = result.unwrap(); // OK in tests
+  expect(user.name).toBe("Alice");
+});
+```
+
+### unwrapOr()
+
+Extracts the value from Ok or returns a fallback value.
+
+```typescript
+unwrapOr<B>(fallback: B): A | B
+```
+
+#### Parameters
+
+<ParamField path="fallback" type="B" required>
+  Value to return if Result is Err
+</ParamField>
+
+#### Returns
+
+<ResponseField name="value" type="A | B">
+  The success value if Ok, otherwise the fallback
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Returns the value, ignores fallback
+- **On Err**: Returns the fallback
+- **Never throws**
+
+#### Examples
+
+```typescript
+// Success case
+const value = Result.ok(42).unwrapOr(0);
+// 42
+
+// Error case
+const value = Result.err<number, string>("failed").unwrapOr(0);
+// 0
+
+// With computed fallback
+const name = getUserName(id).unwrapOr("Anonymous");
+
+// In expressions
+const total = results
+  .map(r => r.unwrapOr(0))
+  .reduce((sum, n) => sum + n, 0);
+```
+
+## Side Effects
+
+### tap()
+
+Runs a side effect function on success, returns the original Result.
+
+```typescript
+tap(fn: (a: A) => void): Result<A, E>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(a: A) => void" required>
+  Side effect function to execute with the value
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Result<A, E>">
+  The original Result unchanged
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Executes `fn` with the value, returns self
+- **On Err**: No-op, returns self
+- **Throws**: `Panic` if `fn` throws
+
+#### Examples
+
+```typescript
+// Logging during chain
+Result.ok(2)
+  .tap(x => console.log(`Got value: ${x}`))
+  .map(x => x * 2)
+  .tap(x => console.log(`Doubled: ${x}`));
+// Logs: "Got value: 2", "Doubled: 4"
+// Returns: Ok(4)
+
+// Debugging
+Result.gen(function* () {
+  const user = yield* getUser(id)
+    .tap(u => console.log("User fetched:", u));
+  
+  const profile = yield* getProfile(user.id)
+    .tap(p => console.log("Profile fetched:", p));
+  
+  return Result.ok({ user, profile });
+});
+
+// No effect on Err
+Result.err<number, string>("failed")
+  .tap(x => console.log(x)); // Not executed
+// Returns: Err("failed")
+```
+
+### tapAsync()
+
+Runs an async side effect function on success, returns Promise of the original Result.
+
+```typescript
+tapAsync(fn: (a: A) => Promise<void>): Promise<Result<A, E>>
+```
+
+#### Parameters
+
+<ParamField path="fn" type="(a: A) => Promise<void>" required>
+  Async side effect function to execute with the value
+</ParamField>
+
+#### Returns
+
+<ResponseField name="result" type="Promise<Result<A, E>>">
+  Promise of the original Result unchanged
+</ResponseField>
+
+#### Behavior
+
+- **On Ok**: Awaits `fn` with the value, returns Promise of self
+- **On Err**: No-op, returns Promise of self
+- **Throws**: `Panic` if `fn` throws synchronously or rejects
+
+#### Examples
+
+```typescript
+// Async logging
+await Result.ok(user)
+  .tapAsync(async (u) => {
+    await analytics.track("user_loaded", { id: u.id });
+  })
+  .then(r => r.map(u => u.profile));
+
+// Async debugging
+await Result.gen(async function* () {
+  const data = yield* Result.await(
+    fetchData(url).tapAsync(async (d) => {
+      await logger.info("Data fetched", d);
+    })
+  );
+  return Result.ok(data);
+});
+
+// No effect on Err
+await Result.err<number, string>("failed")
+  .tapAsync(async x => {
+    await logValue(x); // Not executed
+  });
+// Returns: Err("failed")
+```
+
+## Generator Protocol
+
+### \[Symbol.iterator\]()
+
+Makes Results yieldable in `Result.gen()` blocks.
+
+#### Behavior
+
+- **On Ok**: Returns the value immediately without yielding
+- **On Err**: Yields the error and short-circuits the generator
+
+This enables the `yield*` syntax in generator-based composition:
+
+```typescript
+const result = Result.gen(function* () {
+  const a = yield* getA(); // If Err, short-circuits here
+  const b = yield* getB(a); // Only runs if getA() was Ok
+  return Result.ok({ a, b });
+});
+```
+
+See [Result.gen()](/api/static-methods#gen) for more details.
+
+## See Also
+
+- [Creating Results with ok() and err()](/api/ok-and-err)
+- [Static Methods](/api/static-methods)
+- [Result Type Overview](/api/result)

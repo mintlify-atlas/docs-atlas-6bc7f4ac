@@ -1,0 +1,141 @@
+---
+title: Installation
+description: Install better-result in your TypeScript project
+---
+
+Get started with better-result in seconds using your preferred package manager.
+
+## Package Manager Installation
+
+<CodeGroup>
+```bash npm
+npm install better-result
+```
+
+```bash yarn
+yarn add better-result
+```
+
+```bash pnpm
+pnpm add better-result
+```
+
+```bash bun
+bun add better-result
+```
+</CodeGroup>
+
+## Interactive Setup (Recommended)
+
+For new projects, use the interactive CLI to get everything set up:
+
+```bash
+npx better-result init
+```
+
+This interactive setup will:
+
+1. Install the better-result package
+2. Optionally fetch source code via [opensrc](https://github.com/vercel-labs/opensrc) for better AI context
+3. Install the adoption skill + `/adopt-better-result` command for AI agents
+4. Optionally launch your agent to start refactoring
+
+<Info>
+The adoption skill helps AI coding agents (OpenCode, Claude, Codex) guide you through converting existing error handling to better-result patterns.
+</Info>
+
+## Requirements
+
+<Note>
+**TypeScript 5.0+** is required. better-result uses modern TypeScript features for type safety.
+</Note>
+
+### TypeScript Configuration
+
+For the best experience, enable strict mode in your `tsconfig.json`:
+
+```json tsconfig.json
+{
+  "compilerOptions": {
+    "strict": true,
+    "moduleResolution": "bundler", // or "node16", "nodenext"
+    "esModuleInterop": true,
+    "skipLibCheck": false
+  }
+}
+```
+
+### Runtime Support
+
+better-result is ESM-only and works with:
+
+- **Node.js** 16.0+
+- **Bun** (all versions)
+- **Deno** (with npm specifier: `npm:better-result`)
+- **Browsers** (via bundlers like Vite, webpack, or esbuild)
+
+<Warning>
+CommonJS is not supported. If you need CommonJS, you'll need to transpile the package yourself.
+</Warning>
+
+## Verify Installation
+
+Create a simple test file to verify everything works:
+
+```typescript test.ts
+import { Result } from "better-result";
+
+const result = Result.ok(42);
+console.log(result.value); // 42
+
+const error = Result.err("something went wrong");
+console.log(error.error); // "something went wrong"
+
+console.log("✅ better-result is installed correctly!");
+```
+
+Run it:
+
+<CodeGroup>
+```bash Node.js
+node test.ts
+```
+
+```bash Bun
+bun test.ts
+```
+
+```bash TypeScript (tsx)
+npx tsx test.ts
+```
+</CodeGroup>
+
+You should see:
+
+```
+42
+something went wrong
+✅ better-result is installed correctly!
+```
+
+## Migrating from v1?
+
+If you're upgrading from better-result v1.x to v2.x, use the migration CLI:
+
+```bash
+npx better-result migrate
+```
+
+This will guide you through the breaking changes and help automate the migration process.
+
+<Tip>
+See the [Migration Guide](/guides/migration-v1-to-v2) for detailed information about what changed in v2.
+</Tip>
+
+## Next Steps
+
+Now that better-result is installed, let's build something:
+
+<Card title="Quickstart Tutorial" icon="rocket" href="/quickstart">
+  Build your first Result-based application with a step-by-step guide
+</Card>

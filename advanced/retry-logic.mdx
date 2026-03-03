@@ -1,0 +1,392 @@
+---
+title: "Retry Logic"
+description: "Implement resilient error handling with automatic retry strategies"
+---
+
+## Overview
+
+The `Result.tryPromise` function supports automatic retry logic with configurable backoff strategies. This is essential for handling transient failures in network requests, database operations, and other unreliable operations.
+
+## Basic Retry Configuration
+
+Retry logic is configured through the `retry` option in `Result.tryPromise`:
+
+```typescript
+const result = await Result.tryPromise(
+  () => fetch('https://api.example.com/data'),
+  {
+    retry: {
+      times: 3,           // Number of retry attempts
+      delayMs: 100,       // Base delay between retries
+      backoff: 'exponential' // Backoff strategy
+    }
+  }
+);
+```
+
+<Note>
+  The `times` parameter specifies retry attempts, not total attempts. With `times: 3`, the operation will be attempted up to 4 times total (1 initial + 3 retries).
+</Note>
+
+## Backoff Strategies
+
+Three backoff strategies are available to control the delay between retry attempts:
+
+<Tabs>
+  <Tab title="Exponential">
+    Doubles the delay with each retry attempt. Best for operations that may need increasing time to recover.
+
+    ```typescript
+    await Result.tryPromise(
+      () => fetch(url),
+      {
+        retry: {
+          times: 3,
+          delayMs: 10,
+          backoff: 'exponential'
+        }
+      }
+    );
+    // Delays: 10ms, 20ms, 40ms
+    ```
+
+    **Formula:** `delayMs * 2^attemptNumber`
+  </Tab>
+  <Tab title="Linear">
+    Increases delay linearly with each attempt. Good for rate-limited APIs.
+
+    ```typescript
+    await Result.tryPromise(
+      () => callRateLimitedAPI(),
+      {
+        retry: {
+          times: 3,
+          delayMs: 100,
+          backoff: 'linear'
+        }
+      }
+    );
+    // Delays: 100ms, 200ms, 300ms
+    ```
+
+    **Formula:** `delayMs * (attemptNumber + 1)`
+  </Tab>
+  <Tab title="Constant">
+    Uses the same delay for all retry attempts. Simplest strategy.
+
+    ```typescript
+    await Result.tryPromise(
+      () => queryDatabase(),
+      {
+        retry: {
+          times: 5,
+          delayMs: 50,
+          backoff: 'constant'
+        }
+      }
+    );
+    // Delays: 50ms, 50ms, 50ms, 50ms, 50ms
+    ```
+
+    **Formula:** `delayMs`
+  </Tab>
+</Tabs>
+
+## Selective Retry with shouldRetry
+
+Not all errors should trigger a retry. Use the `shouldRetry` predicate to retry only specific error types:
+
+```typescript
+class NetworkError extends TaggedError('NetworkError')<{
+  message: string;
+  retryable: boolean;
+}>() {}
+
+class ValidationError extends TaggedError('ValidationError')<{
+  message: string;
+  field: string;
+}>() {}
+
+const result = await Result.tryPromise(
+  {
+    try: () => callAPI(),
+    catch: (e) => {
+      if (e instanceof TypeError) {
+        return new NetworkError({ 
+          message: e.message,
+          retryable: true 
+        });
+      }
+      return new ValidationError({ 
+        message: 'Invalid input',
+        field: 'unknown' 
+      });
+    }
+  },
+  {
+    retry: {
+      times: 3,
+      delayMs: 100,
+      backoff: 'exponential',
+      shouldRetry: (e) => e._tag === 'NetworkError' && e.retryable
+    }
+  }
+);
+```
+
+<Warning>
+  If the `shouldRetry` predicate throws an error, it will result in a `Panic`. Ensure your predicate is safe and handles all error cases.
+</Warning>
+
+## Async Error Enrichment
+
+You can enrich errors asynchronously in the `catch` handler, enabling complex retry logic based on external state:
+
+```typescript
+class ApiError extends TaggedError('ApiError')<{
+  message: string;
+  rateLimited: boolean;
+  status: number;
+}>() {}
+
+const result = await Result.tryPromise(
+  {
+    try: () => fetch('/api/users'),
+    catch: async (e) => {
+      // Check rate limit status from cache
+      const limited = await redis.get(`ratelimit:${userId}`);
+      const response = e as Response;
+      
+      return new ApiError({
+        message: await response.text(),
+        rateLimited: !!limited || response.status === 429,
+        status: response.status
+      });
+    }
+  },
+  {
+    retry: {
+      times: 3,
+      delayMs: 1000,
+      backoff: 'exponential',
+      // Don't retry if rate limited - wait longer instead
+      shouldRetry: (e) => !e.rateLimited
+    }
+  }
+);
+```
+
+## Real-World Patterns
+
+### Circuit Breaker Pattern
+
+Combine retry logic with state tracking to implement a circuit breaker:
+
+```typescript
+class CircuitBreaker {
+  private failures = 0;
+  private lastFailure: number | null = null;
+  private readonly threshold = 5;
+  private readonly resetTimeout = 60000; // 1 minute
+
+  async call<T>(fn: () => Promise<T>): Promise<Result<T, Error>> {
+    // Reset if timeout passed
+    if (this.lastFailure && Date.now() - this.lastFailure > this.resetTimeout) {
+      this.failures = 0;
+      this.lastFailure = null;
+    }
+
+    // Circuit open - fail fast
+    if (this.failures >= this.threshold) {
+      return Result.err(new Error('Circuit breaker open'));
+    }
+
+    const result = await Result.tryPromise(
+      fn,
+      {
+        retry: {
+          times: 3,
+          delayMs: 100,
+          backoff: 'exponential'
+        }
+      }
+    );
+
+    if (Result.isError(result)) {
+      this.failures++;
+      this.lastFailure = Date.now();
+    } else {
+      this.failures = 0;
+      this.lastFailure = null;
+    }
+
+    return result;
+  }
+}
+```
+
+### Retry with Jitter
+
+Add randomization to avoid thundering herd problems:
+
+```typescript
+function withJitter(delayMs: number): number {
+  // Add ±25% jitter
+  const jitter = delayMs * 0.25;
+  return delayMs + (Math.random() * jitter * 2 - jitter);
+}
+
+// Custom implementation with jitter
+async function tryWithJitter<T>(
+  fn: () => Promise<T>,
+  maxRetries: number
+): Promise<Result<T, Error>> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const value = await fn();
+      return Result.ok(value);
+    } catch (e) {
+      lastError = e as Error;
+      if (attempt < maxRetries) {
+        const baseDelay = 100 * Math.pow(2, attempt);
+        await new Promise(resolve => 
+          setTimeout(resolve, withJitter(baseDelay))
+        );
+      }
+    }
+  }
+  
+  return Result.err(lastError!);
+}
+```
+
+### Database Transaction Retry
+
+Handle deadlock retries in database transactions:
+
+```typescript
+class DeadlockError extends TaggedError('DeadlockError')<{
+  message: string;
+}>() {}
+
+class TransactionError extends TaggedError('TransactionError')<{
+  message: string;
+  cause: unknown;
+}>() {}
+
+async function runTransaction<T>(
+  operation: () => Promise<T>
+): Promise<Result<T, DeadlockError | TransactionError>> {
+  return await Result.tryPromise(
+    {
+      try: operation,
+      catch: (e) => {
+        const error = e as { code?: string; message: string };
+        
+        // PostgreSQL/MySQL deadlock codes
+        if (error.code === '40P01' || error.code === 'ER_LOCK_DEADLOCK') {
+          return new DeadlockError({ message: error.message });
+        }
+        
+        return new TransactionError({ 
+          message: error.message,
+          cause: e 
+        });
+      }
+    },
+    {
+      retry: {
+        times: 3,
+        delayMs: 50,
+        backoff: 'exponential',
+        shouldRetry: (e) => e._tag === 'DeadlockError'
+      }
+    }
+  );
+}
+```
+
+## Testing Retry Logic
+
+Test retry behavior by tracking attempt counts:
+
+```typescript
+import { describe, it, expect } from 'bun:test';
+import { Result } from 'better-result';
+
+describe('Retry Logic', () => {
+  it('retries on failure and succeeds', async () => {
+    let attempts = 0;
+    
+    const result = await Result.tryPromise(
+      () => {
+        attempts++;
+        if (attempts < 3) {
+          return Promise.reject(new Error('fail'));
+        }
+        return Promise.resolve('success');
+      },
+      { retry: { times: 3, delayMs: 1, backoff: 'constant' } }
+    );
+    
+    expect(Result.isOk(result)).toBe(true);
+    expect(attempts).toBe(3);
+    expect(result.unwrap()).toBe('success');
+  });
+
+  it('stops retrying when shouldRetry returns false', async () => {
+    let attempts = 0;
+    
+    const result = await Result.tryPromise(
+      {
+        try: () => {
+          attempts++;
+          throw new Error(attempts === 1 ? 'retryable' : 'fatal');
+        },
+        catch: (e) => ({
+          retryable: (e as Error).message === 'retryable',
+          msg: (e as Error).message
+        })
+      },
+      {
+        retry: {
+          times: 5,
+          delayMs: 1,
+          backoff: 'constant',
+          shouldRetry: (e) => e.retryable
+        }
+      }
+    );
+    
+    // Attempted once, retried once, then stopped
+    expect(attempts).toBe(2);
+    expect(Result.isError(result)).toBe(true);
+  });
+});
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Choose appropriate backoff">
+    Use exponential backoff for network errors, linear for rate limits, and constant for quick operations.
+  </Step>
+  <Step title="Set reasonable limits">
+    Don't retry indefinitely. Set `times` based on your operation's SLA and timeout constraints.
+  </Step>
+  <Step title="Use shouldRetry for selective retry">
+    Only retry transient errors. Don't retry validation errors, auth failures, or client errors (4xx).
+  </Step>
+  <Step title="Add timeout protection">
+    Combine retry logic with operation timeouts to prevent hanging indefinitely.
+  </Step>
+  <Step title="Monitor retry metrics">
+    Track retry attempts and success rates to identify systemic issues.
+  </Step>
+</Steps>
+
+<Tip>
+  For operations without built-in retry support, consider wrapping them in `Result.tryPromise` with retry configuration rather than implementing custom retry logic.
+</Tip>

@@ -1,80 +1,481 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Build your first application with better-result in minutes
 ---
 
-## Get started in three steps
+This guide will walk you through the core features of better-result by building a user profile fetcher that handles errors gracefully.
 
-Get your documentation site running locally and make your first customization.
+## What We'll Build
 
-### Step 1: Set up your local environment
+We'll create a function that:
+- Fetches user data from an API
+- Parses and validates the response
+- Handles multiple error types (network, parsing, validation)
+- Uses generator composition for clean control flow
+- Provides type-safe error handling with pattern matching
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
 
-### Step 2: Deploy your changes
+<Step title="Create Ok and Err Results">
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+Let's start with the basics — creating success and error Results:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```typescript
+import { Result } from "better-result";
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+// Success value
+const success = Result.ok(42);
+console.log(success.value); // 42
 
-### Step 3: Go live
+// Error value
+const error = Result.err("Something went wrong");
+console.log(error.error); // "Something went wrong"
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+// Type guards
+if (Result.isOk(success)) {
+  console.log("Got value:", success.value);
+}
 
-## Next steps
+if (Result.isError(error)) {
+  console.log("Got error:", error.error);
+}
+```
 
-Now that you have your docs running, explore these key features:
+<Info>
+Results use a discriminated union with `status: "ok" | "error"` for type narrowing.
+</Info>
 
-<CardGroup cols={2}>
+</Step>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+<Step title="Wrap Throwing Functions">
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+Most JavaScript APIs throw exceptions. Wrap them with `Result.try` to convert exceptions into type-safe Results:
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+```typescript
+import { Result } from "better-result";
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+// Wrap JSON.parse (throws on invalid JSON)
+const parsed = Result.try(() => JSON.parse('{"name": "Alice"}'));
 
-</CardGroup>
+if (Result.isOk(parsed)) {
+  console.log(parsed.value.name); // "Alice"
+} else {
+  // error is UnhandledException (contains the original exception)
+  console.error("Parse failed:", parsed.error.cause);
+}
+
+// Wrap async functions
+const response = await Result.tryPromise(() => fetch("https://api.example.com/user/1"));
+```
+
+<Tip>
+The error type is `UnhandledException` by default. We'll create custom error types next.
+</Tip>
+
+</Step>
+
+<Step title="Define Tagged Errors">
+
+Create discriminated error types for exhaustive pattern matching:
+
+```typescript
+import { TaggedError } from "better-result";
+
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  message: string;
+}>() {}
+
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+// Create error instances
+const netErr = new NetworkError({
+  url: "https://api.example.com",
+  message: "Connection refused",
+});
+
+console.log(netErr._tag); // "NetworkError"
+console.log(netErr.url);  // "https://api.example.com"
+```
+
+Now we can use custom error handlers in `Result.try`:
+
+```typescript
+const parsed = Result.try({
+  try: () => JSON.parse(input),
+  catch: (e) => new ParseError({
+    message: e instanceof Error ? e.message : String(e),
+  }),
+});
+// Result<unknown, ParseError>
+```
+
+</Step>
+
+<Step title="Compose with Result.gen">
+
+The real power of better-result comes from generator composition. Use `yield*` to unwrap Results and automatically short-circuit on errors:
+
+```typescript user-profile.ts
+import { Result, TaggedError } from "better-result";
+
+// Define our error types
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  message: string;
+}>() {}
+
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+type AppError = NetworkError | ParseError | ValidationError;
+
+// Define types
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+// Helper: Fetch with custom error handling
+function fetchUser(id: number): Promise<Result<Response, NetworkError>> {
+  return Result.tryPromise(
+    {
+      try: () => fetch(`https://api.example.com/users/${id}`),
+      catch: (e) => new NetworkError({
+        url: `https://api.example.com/users/${id}`,
+        message: e instanceof Error ? e.message : String(e),
+      }),
+    },
+    {
+      retry: {
+        times: 3,
+        delayMs: 100,
+        backoff: "exponential",
+      },
+    },
+  );
+}
+
+// Helper: Parse JSON response
+function parseUserJSON(text: string): Result<unknown, ParseError> {
+  return Result.try({
+    try: () => JSON.parse(text),
+    catch: (e) => new ParseError({
+      message: e instanceof Error ? e.message : String(e),
+    }),
+  });
+}
+
+// Helper: Validate user shape
+function validateUser(data: unknown): Result<User, ValidationError> {
+  if (!data || typeof data !== "object") {
+    return Result.err(new ValidationError({
+      field: "data",
+      message: "Expected object",
+    }));
+  }
+
+  const obj = data as Record<string, unknown>;
+
+  if (typeof obj.id !== "number") {
+    return Result.err(new ValidationError({
+      field: "id",
+      message: "Expected number",
+    }));
+  }
+
+  if (typeof obj.name !== "string") {
+    return Result.err(new ValidationError({
+      field: "name",
+      message: "Expected string",
+    }));
+  }
+
+  if (typeof obj.email !== "string") {
+    return Result.err(new ValidationError({
+      field: "email",
+      message: "Expected string",
+    }));
+  }
+
+  return Result.ok({ id: obj.id, name: obj.name, email: obj.email });
+}
+
+// Compose everything with Result.gen
+export async function getUserProfile(id: number): Promise<Result<User, AppError>> {
+  return await Result.gen(async function* () {
+    // Fetch user (auto-unwraps or short-circuits on error)
+    const response = yield* Result.await(fetchUser(id));
+
+    // Check status
+    if (!response.ok) {
+      return Result.err(new NetworkError({
+        url: response.url,
+        message: `HTTP ${response.status}`,
+      }));
+    }
+
+    // Get response text
+    const text = yield* Result.await(
+      Result.tryPromise({
+        try: () => response.text(),
+        catch: (e) => new NetworkError({
+          url: response.url,
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      }),
+    );
+
+    // Parse JSON
+    const json = yield* parseUserJSON(text);
+
+    // Validate structure
+    const user = yield* validateUser(json);
+
+    return Result.ok(user);
+  });
+}
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+`yield*` unwraps `Ok` values and short-circuits on `Err`. Use `Result.await()` to wrap `Promise<Result>` in async generators.
 </Note>
+
+</Step>
+
+<Step title="Handle Errors with Pattern Matching">
+
+Now use the function and handle all possible errors:
+
+```typescript main.ts
+import { getUserProfile } from "./user-profile";
+import { matchError } from "better-result";
+
+const result = await getUserProfile(1);
+
+if (result.isOk()) {
+  console.log("User:", result.value);
+} else {
+  // Exhaustive error handling
+  const message = matchError(result.error, {
+    NetworkError: (e) => `Network error at ${e.url}: ${e.message}`,
+    ParseError: (e) => `Failed to parse JSON: ${e.message}`,
+    ValidationError: (e) => `Invalid ${e.field}: ${e.message}`,
+  });
+
+  console.error(message);
+}
+```
+
+<Tip>
+`matchError` ensures all error cases are handled. TypeScript will error if you miss any error types!
+</Tip>
+
+Alternatively, use `Result.match()` for inline pattern matching:
+
+```typescript
+const message = result.match({
+  ok: (user) => `Welcome, ${user.name}!`,
+  err: (error) => matchError(error, {
+    NetworkError: (e) => `Network error: ${e.message}`,
+    ParseError: (e) => `Parse error: ${e.message}`,
+    ValidationError: (e) => `Validation error on ${e.field}: ${e.message}`,
+  }),
+});
+
+console.log(message);
+```
+
+</Step>
+
+<Step title="Transform Results">
+
+Use `.map()` and `.andThen()` to transform Results:
+
+```typescript
+import { Result } from "better-result";
+
+// Transform success values
+const result = Result.ok(2)
+  .map((x) => x * 2)      // Ok(4)
+  .map((x) => x + 10);    // Ok(14)
+
+console.log(result.value); // 14
+
+// Chain Result-returning functions
+function divide(a: number, b: number): Result<number, string> {
+  return b === 0 ? Result.err("Division by zero") : Result.ok(a / b);
+}
+
+const chained = Result.ok(10)
+  .andThen((x) => divide(x, 2))  // Ok(5)
+  .andThen((x) => divide(x, 0)); // Err("Division by zero")
+
+if (chained.isErr()) {
+  console.error(chained.error); // "Division by zero"
+}
+
+// Transform errors
+const withMappedError = Result.err("simple error")
+  .mapError((e) => ({ code: 500, message: e }));
+
+if (withMappedError.isErr()) {
+  console.log(withMappedError.error); // { code: 500, message: "simple error" }
+}
+```
+
+</Step>
+
+</Steps>
+
+## Complete Example
+
+Here's the full working example:
+
+<CodeGroup>
+```typescript user-profile.ts
+import { Result, TaggedError } from "better-result";
+
+class NetworkError extends TaggedError("NetworkError")<{
+  url: string;
+  message: string;
+}>() {}
+
+class ParseError extends TaggedError("ParseError")<{
+  message: string;
+}>() {}
+
+class ValidationError extends TaggedError("ValidationError")<{
+  field: string;
+  message: string;
+}>() {}
+
+type AppError = NetworkError | ParseError | ValidationError;
+
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+function fetchUser(id: number): Promise<Result<Response, NetworkError>> {
+  return Result.tryPromise(
+    {
+      try: () => fetch(`https://api.example.com/users/${id}`),
+      catch: (e) => new NetworkError({
+        url: `https://api.example.com/users/${id}`,
+        message: e instanceof Error ? e.message : String(e),
+      }),
+    },
+    { retry: { times: 3, delayMs: 100, backoff: "exponential" } },
+  );
+}
+
+function parseUserJSON(text: string): Result<unknown, ParseError> {
+  return Result.try({
+    try: () => JSON.parse(text),
+    catch: (e) => new ParseError({
+      message: e instanceof Error ? e.message : String(e),
+    }),
+  });
+}
+
+function validateUser(data: unknown): Result<User, ValidationError> {
+  if (!data || typeof data !== "object") {
+    return Result.err(new ValidationError({ field: "data", message: "Expected object" }));
+  }
+  const obj = data as Record<string, unknown>;
+  if (typeof obj.id !== "number") {
+    return Result.err(new ValidationError({ field: "id", message: "Expected number" }));
+  }
+  if (typeof obj.name !== "string") {
+    return Result.err(new ValidationError({ field: "name", message: "Expected string" }));
+  }
+  if (typeof obj.email !== "string") {
+    return Result.err(new ValidationError({ field: "email", message: "Expected string" }));
+  }
+  return Result.ok({ id: obj.id, name: obj.name, email: obj.email });
+}
+
+export async function getUserProfile(id: number): Promise<Result<User, AppError>> {
+  return await Result.gen(async function* () {
+    const response = yield* Result.await(fetchUser(id));
+    if (!response.ok) {
+      return Result.err(new NetworkError({ url: response.url, message: `HTTP ${response.status}` }));
+    }
+    const text = yield* Result.await(
+      Result.tryPromise({
+        try: () => response.text(),
+        catch: (e) => new NetworkError({
+          url: response.url,
+          message: e instanceof Error ? e.message : String(e),
+        }),
+      }),
+    );
+    const json = yield* parseUserJSON(text);
+    const user = yield* validateUser(json);
+    return Result.ok(user);
+  });
+}
+```
+
+```typescript main.ts
+import { getUserProfile } from "./user-profile";
+import { matchError } from "better-result";
+
+const result = await getUserProfile(1);
+
+const message = result.match({
+  ok: (user) => `Welcome, ${user.name}!`,
+  err: (error) => matchError(error, {
+    NetworkError: (e) => `Network error at ${e.url}: ${e.message}`,
+    ParseError: (e) => `Failed to parse JSON: ${e.message}`,
+    ValidationError: (e) => `Invalid ${e.field}: ${e.message}`,
+  }),
+});
+
+console.log(message);
+```
+</CodeGroup>
+
+## What You've Learned
+
+You now know how to:
+
+- ✅ Create `Ok` and `Err` results
+- ✅ Wrap throwing functions with `Result.try` and `Result.tryPromise`
+- ✅ Define custom error types with `TaggedError`
+- ✅ Compose operations with `Result.gen` and `yield*`
+- ✅ Handle errors exhaustively with pattern matching
+- ✅ Transform Results with `.map()` and `.andThen()`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Result Type Deep Dive" icon="book" href="/api/result">
+    Learn about all Result methods and combinators
+  </Card>
+  <Card title="Error Handling Patterns" icon="triangle-exclamation" href="/core/error-handling">
+    Master TaggedError and error composition patterns
+  </Card>
+  <Card title="Generator Composition" icon="code" href="/core/generator-composition">
+    Understand how Result.gen works under the hood
+  </Card>
+  <Card title="API Reference" icon="book-open" href="/api/result">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

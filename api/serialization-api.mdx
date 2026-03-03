@@ -1,0 +1,490 @@
+---
+title: Serialization API
+description: Serialize and deserialize Result types for RPC, server actions, and data transfer
+icon: arrow-right-arrow-left
+---
+
+## Overview
+
+The serialization API allows you to convert `Result` instances to plain JavaScript objects for network transfer, RPC calls, or server actions, then reconstruct them back into proper `Ok` or `Err` instances.
+
+This is essential for:
+- Next.js Server Actions
+- tRPC procedures
+- API responses
+- Any scenario where Result instances cross process boundaries
+
+---
+
+## Result.serialize
+
+Converts a Result instance into a plain object that can be safely serialized to JSON.
+
+### Signature
+
+```typescript
+Result.serialize<T, E>(result: Result<T, E>): SerializedResult<T, E>
+```
+
+<ParamField path="result" type="Result<T, E>" required>
+  The Result instance to serialize
+</ParamField>
+
+<ResponseField name="Return Type" type="SerializedResult<T, E>">
+  A plain object representing the Result:
+  - `{ status: "ok", value: T }` for Ok
+  - `{ status: "error", error: E }` for Err
+</ResponseField>
+
+### Usage Examples
+
+<CodeGroup>
+```typescript Basic Serialization
+import { Result } from "better-result";
+
+const success = Result.ok({ id: 1, name: "Alice" });
+const serialized = Result.serialize(success);
+console.log(serialized);
+// { status: "ok", value: { id: 1, name: "Alice" } }
+
+const failure = Result.err({ code: "NOT_FOUND", message: "User not found" });
+const serializedErr = Result.serialize(failure);
+console.log(serializedErr);
+// { status: "error", error: { code: "NOT_FOUND", message: "User not found" } }
+```
+
+```typescript Next.js Server Action
+"use server";
+
+import { Result } from "better-result";
+
+class ValidationError {
+  constructor(public field: string, public message: string) {}
+}
+
+export async function createUser(data: FormData) {
+  const result = Result.gen(function* () {
+    const name = data.get("name");
+    if (!name) {
+      return Result.err(new ValidationError("name", "Name is required"));
+    }
+
+    const user = yield* saveUser({ name: name.toString() });
+    return Result.ok(user);
+  });
+
+  // Serialize for client transfer
+  return Result.serialize(await result);
+}
+```
+
+```typescript tRPC Procedure
+import { Result } from "better-result";
+import { z } from "zod";
+import { publicProcedure } from "./trpc";
+
+export const getUser = publicProcedure
+  .input(z.object({ id: z.string() }))
+  .query(async ({ input }) => {
+    const result = await Result.tryPromise({
+      try: () => db.user.findUnique({ where: { id: input.id } }),
+      catch: (err) => new DbError(err),
+    });
+
+    // Serialize for network transfer
+    return Result.serialize(result);
+  });
+```
+
+```typescript API Route
+import { Result } from "better-result";
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id");
+
+  const result = await fetchData(id);
+
+  return Response.json(Result.serialize(result));
+}
+```
+</CodeGroup>
+
+---
+
+## Result.deserialize
+
+Reconstructs a Result instance from a serialized plain object. Returns `Err<ResultDeserializationError>` if the input is invalid.
+
+### Signature
+
+```typescript
+Result.deserialize<T, E>(
+  value: unknown
+): Result<T, E | ResultDeserializationError>
+```
+
+<ParamField path="value" type="unknown" required>
+  The value to deserialize (typically from JSON)
+</ParamField>
+
+<ResponseField name="Return Type" type="Result<T, E | ResultDeserializationError>">
+  - `Ok<T, E>` if value is a valid serialized Ok
+  - `Err<T, E>` if value is a valid serialized Err
+  - `Err<T, ResultDeserializationError>` if value is invalid
+</ResponseField>
+
+### Usage Examples
+
+<CodeGroup>
+```typescript Basic Deserialization
+import { Result } from "better-result";
+
+const serialized = { status: "ok", value: { id: 1, name: "Alice" } };
+const result = Result.deserialize<{ id: number; name: string }, never>(serialized);
+
+if (result.isOk()) {
+  console.log(result.value); // { id: 1, name: "Alice" }
+}
+```
+
+```typescript Client-Side (Next.js)
+import { Result, ResultDeserializationError } from "better-result";
+import { createUser } from "./actions";
+
+async function handleSubmit(formData: FormData) {
+  const serialized = await createUser(formData);
+  const result = Result.deserialize<User, ValidationError>(serialized);
+
+  if (result.isOk()) {
+    console.log("User created:", result.value);
+  } else if (ResultDeserializationError.is(result.error)) {
+    console.error("Invalid response from server");
+  } else {
+    console.error("Validation failed:", result.error.message);
+  }
+}
+```
+
+```typescript tRPC Client
+import { Result, ResultDeserializationError } from "better-result";
+import { trpc } from "./trpc";
+
+const serialized = await trpc.getUser.query({ id: "123" });
+const result = Result.deserialize<User, DbError>(serialized);
+
+result.match({
+  ok: (user) => console.log("User:", user),
+  err: (error) => {
+    if (ResultDeserializationError.is(error)) {
+      console.error("Malformed response");
+    } else {
+      console.error("DB error:", error.message);
+    }
+  },
+});
+```
+
+```typescript Error Handling
+import { Result, ResultDeserializationError } from "better-result";
+
+// Invalid input
+const invalid = Result.deserialize({ foo: "bar" });
+if (Result.isError(invalid) && ResultDeserializationError.is(invalid.error)) {
+  console.log("Bad input:", invalid.error.value);
+  // Bad input: { foo: "bar" }
+}
+
+// Valid serialized error
+const validErr = Result.deserialize({ status: "error", error: "Not found" });
+if (Result.isError(validErr)) {
+  console.log(validErr.error); // "Not found"
+}
+```
+</CodeGroup>
+
+<Note>
+`Result.deserialize` is type-safe but cannot validate the actual runtime shape of `T` or `E`. Consider using a schema validator like Zod for runtime validation of the payload.
+</Note>
+
+---
+
+## SerializedResult Type
+
+The plain object structure representing a serialized Result.
+
+### Type Definition
+
+```typescript
+type SerializedResult<T, E> = SerializedOk<T> | SerializedErr<E>;
+
+interface SerializedOk<T> {
+  status: "ok";
+  value: T;
+}
+
+interface SerializedErr<E> {
+  status: "error";
+  error: E;
+}
+```
+
+<ParamField path="SerializedOk<T>" type="object">
+  Represents a serialized success result
+  <Expandable title="properties">
+    <ResponseField name="status" type='"ok"' required>
+      Discriminator field with literal value "ok"
+    </ResponseField>
+    <ResponseField name="value" type="T" required>
+      The success value
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="SerializedErr<E>" type="object">
+  Represents a serialized error result
+  <Expandable title="properties">
+    <ResponseField name="status" type='"error"' required>
+      Discriminator field with literal value "error"
+    </ResponseField>
+    <ResponseField name="error" type="E" required>
+      The error value
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+### Usage Example
+
+```typescript
+import type { SerializedResult } from "better-result";
+
+// Type annotation for API responses
+type ApiResponse = SerializedResult<
+  { id: string; name: string },
+  { code: string; message: string }
+>;
+
+const response: ApiResponse = {
+  status: "ok",
+  value: { id: "123", name: "Alice" },
+};
+```
+
+---
+
+## ResultDeserializationError
+
+Error returned when `Result.deserialize` receives invalid input.
+
+### Class Definition
+
+```typescript
+class ResultDeserializationError extends TaggedError("ResultDeserializationError")<{
+  message: string;
+  value: unknown;
+}>()
+```
+
+<ParamField path="_tag" type='"ResultDeserializationError"' required>
+  Tagged error discriminator
+</ParamField>
+
+<ParamField path="message" type="string" required>
+  Error message describing the deserialization failure
+</ParamField>
+
+<ParamField path="value" type="unknown" required>
+  The invalid value that failed to deserialize
+</ParamField>
+
+### Type Guard
+
+```typescript
+ResultDeserializationError.is(value: unknown): value is ResultDeserializationError
+```
+
+Static type guard method to check if a value is a `ResultDeserializationError` instance.
+
+### Usage Examples
+
+<CodeGroup>
+```typescript Error Detection
+import { Result, ResultDeserializationError } from "better-result";
+
+const result = Result.deserialize(unknownData);
+
+if (Result.isError(result)) {
+  if (ResultDeserializationError.is(result.error)) {
+    console.error("Invalid serialized Result:", result.error.value);
+  } else {
+    console.error("Application error:", result.error);
+  }
+}
+```
+
+```typescript Pattern Matching
+import { Result, ResultDeserializationError } from "better-result";
+
+const result = Result.deserialize<User, AppError>(data);
+
+result.match({
+  ok: (user) => console.log("Success:", user),
+  err: (error) => {
+    if (ResultDeserializationError.is(error)) {
+      // Handle deserialization failure
+      return { error: "Invalid response format" };
+    }
+    // Handle application error
+    return { error: error.message };
+  },
+});
+```
+
+```typescript With Error Normalization
+import { Result, ResultDeserializationError } from "better-result";
+
+const result = Result.deserialize<Data, CustomError>(response)
+  .mapError((err) => {
+    if (ResultDeserializationError.is(err)) {
+      return new CustomError("MALFORMED_RESPONSE", err.message);
+    }
+    return err;
+  });
+```
+</CodeGroup>
+
+---
+
+## Complete Example: Server Action + Client
+
+<CodeGroup>
+```typescript actions.ts (Server)
+"use server";
+
+import { Result } from "better-result";
+
+class NotFoundError {
+  readonly _tag = "NotFoundError";
+  constructor(public id: string) {}
+}
+
+class DbError {
+  readonly _tag = "DbError";
+  constructor(public message: string) {}
+}
+
+export async function fetchUserData(userId: string) {
+  const result = await Result.gen(async function* () {
+    const user = yield* await Result.tryPromise({
+      try: () => db.user.findUnique({ where: { id: userId } }),
+      catch: () => new NotFoundError(userId),
+    });
+
+    if (!user) {
+      return Result.err(new NotFoundError(userId));
+    }
+
+    const posts = yield* await Result.tryPromise({
+      try: () => db.post.findMany({ where: { userId } }),
+      catch: (err) => new DbError(String(err)),
+    });
+
+    return Result.ok({ user, posts });
+  });
+
+  // Serialize for client transfer
+  return Result.serialize(result);
+}
+```
+
+```typescript component.tsx (Client)
+import { Result, ResultDeserializationError } from "better-result";
+import { fetchUserData } from "./actions";
+
+type User = { id: string; name: string };
+type Post = { id: string; title: string };
+type NotFoundError = { _tag: "NotFoundError"; id: string };
+type DbError = { _tag: "DbError"; message: string };
+
+export async function UserProfile({ userId }: { userId: string }) {
+  const serialized = await fetchUserData(userId);
+  const result = Result.deserialize<
+    { user: User; posts: Post[] },
+    NotFoundError | DbError
+  >(serialized);
+
+  return result.match({
+    ok: ({ user, posts }) => (
+      <div>
+        <h1>{user.name}</h1>
+        <ul>
+          {posts.map((post) => (
+            <li key={post.id}>{post.title}</li>
+          ))}
+        </ul>
+      </div>
+    ),
+    err: (error) => {
+      if (ResultDeserializationError.is(error)) {
+        return <div>Invalid server response</div>;
+      }
+      if (error._tag === "NotFoundError") {
+        return <div>User {error.id} not found</div>;
+      }
+      return <div>Database error: {error.message}</div>;
+    },
+  });
+}
+```
+</CodeGroup>
+
+---
+
+## Best Practices
+
+<Note>
+**Always validate deserialized data** - `Result.deserialize` only validates the Result structure, not the actual payload types. Use schema validators like Zod for production applications.
+</Note>
+
+```typescript
+import { Result } from "better-result";
+import { z } from "zod";
+
+const UserSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  email: z.string().email(),
+});
+
+const result = Result.deserialize(data)
+  .andThen((value) =>
+    Result.try({
+      try: () => UserSchema.parse(value),
+      catch: (err) => new ValidationError(String(err)),
+    })
+  );
+```
+
+<Tip>
+**Serialize at boundaries** - Only serialize Results when crossing process boundaries (server actions, API routes). Keep them as proper instances within the same process.
+</Tip>
+
+<Warning>
+**Type consistency** - Ensure the generic types used in `Result.deserialize` match those used in `Result.serialize` on the server side.
+</Warning>
+
+---
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Result Core" icon="code" href="/api/result">
+    Learn about Result, Ok, and Err classes
+  </Card>
+  <Card title="Type Utilities" icon="wrench" href="/api/type-utilities">
+    Extract types with InferOk and InferErr
+  </Card>
+  <Card title="Error Handling" icon="triangle-exclamation" href="/core/error-handling">
+    TaggedError and error patterns
+  </Card>
+</CardGroup>

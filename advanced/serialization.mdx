@@ -1,0 +1,478 @@
+---
+title: "Serialization"
+description: "Serialize and deserialize Result types for RPC, storage, and data transfer"
+---
+
+## Overview
+
+Result instances are class instances with methods and cannot be directly serialized to JSON for transmission over the network or storage. The `Result.serialize` and `Result.deserialize` functions convert between Result instances and plain objects suitable for JSON serialization.
+
+## When to Use Serialization
+
+Serialization is essential when:
+
+- **Server Actions**: Passing Results from Next.js server actions to client components
+- **RPC/tRPC**: Returning Results from remote procedure calls
+- **Storage**: Persisting Results to databases or caches
+- **Message Queues**: Sending Results through message brokers
+- **Web Workers**: Transferring Results between main thread and workers
+
+<Warning>
+  Result instances lose their methods when serialized with `JSON.stringify`. Always use `Result.serialize` before JSON serialization and `Result.deserialize` after JSON parsing.
+</Warning>
+
+## Serialization API
+
+### Result.serialize
+
+Converts a Result instance to a plain object:
+
+```typescript
+const okResult = Result.ok({ id: 42, name: 'Alice' });
+const serialized = Result.serialize(okResult);
+
+console.log(serialized);
+// { status: 'ok', value: { id: 42, name: 'Alice' } }
+
+const errResult = Result.err({ code: 'NOT_FOUND', message: 'User not found' });
+const serializedErr = Result.serialize(errResult);
+
+console.log(serializedErr);
+// { status: 'error', error: { code: 'NOT_FOUND', message: 'User not found' } }
+```
+
+### SerializedResult Type
+
+The serialized form is a discriminated union:
+
+```typescript
+// From src/result.ts:722-735
+interface SerializedOk<T> {
+  status: 'ok';
+  value: T;
+}
+
+interface SerializedErr<E> {
+  status: 'error';
+  error: E;
+}
+
+type SerializedResult<T, E> = SerializedOk<T> | SerializedErr<E>;
+```
+
+You can work with serialized Results directly if needed:
+
+```typescript
+import type { SerializedResult } from 'better-result';
+
+const handleSerializedResult = (data: SerializedResult<User, AppError>) => {
+  if (data.status === 'ok') {
+    console.log('User:', data.value);
+  } else {
+    console.error('Error:', data.error);
+  }
+};
+```
+
+### Result.deserialize
+
+Converts a serialized Result back to a Result instance:
+
+```typescript
+const serialized = { status: 'ok', value: { id: 1, name: 'Bob' } };
+const result = Result.deserialize<User, Error>(serialized);
+
+if (Result.isOk(result)) {
+  console.log(result.value); // { id: 1, name: 'Bob' }
+  console.log(result.map(u => u.name)); // Result can use methods again
+}
+```
+
+<Note>
+  `Result.deserialize` validates the structure and returns `Err<ResultDeserializationError>` if the input is invalid.
+</Note>
+
+## Handling Deserialization Errors
+
+When deserializing untrusted data, always handle `ResultDeserializationError`:
+
+```typescript
+import { Result, ResultDeserializationError } from 'better-result';
+
+const deserializeUserResult = (data: unknown) => {
+  const result = Result.deserialize<User, AppError>(data);
+  
+  if (Result.isError(result)) {
+    // Could be AppError OR ResultDeserializationError
+    if (ResultDeserializationError.is(result.error)) {
+      console.error('Invalid serialized Result:', result.error.value);
+      // Handle malformed data
+      return null;
+    }
+    
+    // It's an AppError
+    console.error('Application error:', result.error.message);
+    return null;
+  }
+  
+  return result.value;
+};
+```
+
+## JSON Roundtrip
+
+Complete example of serializing, JSON encoding, and deserializing:
+
+```typescript
+// 1. Create Result
+const original = Result.ok({ id: 1, data: [1, 2, 3] });
+
+// 2. Serialize to plain object
+const serialized = Result.serialize(original);
+
+// 3. JSON encode
+const json = JSON.stringify(serialized);
+console.log(json);
+// '{"status":"ok","value":{"id":1,"data":[1,2,3]}}'
+
+// 4. JSON decode
+const parsed = JSON.parse(json);
+
+// 5. Deserialize back to Result
+const restored = Result.deserialize<{ id: number; data: number[] }, never>(parsed);
+
+// 6. Use as normal Result
+const mapped = restored.map(v => v.data.length);
+console.log(mapped.unwrap()); // 3
+```
+
+## Use Cases
+
+### Next.js Server Actions
+
+```typescript
+// app/actions.ts
+'use server';
+
+import { Result, SerializedResult } from 'better-result';
+
+class ValidationError extends TaggedError('ValidationError')<{
+  message: string;
+  field: string;
+}>() {}
+
+export async function createUser(
+  data: FormData
+): Promise<SerializedResult<User, ValidationError>> {
+  const result = await Result.gen(async function* () {
+    const name = data.get('name')?.toString();
+    
+    if (!name || name.length < 2) {
+      return Result.err(new ValidationError({
+        message: 'Name must be at least 2 characters',
+        field: 'name'
+      }));
+    }
+    
+    const user = yield* Result.await(
+      Result.tryPromise(() => db.users.create({ name }))
+    );
+    
+    return Result.ok(user);
+  });
+  
+  // Serialize before returning to client
+  return Result.serialize(result);
+}
+```
+
+```typescript
+// app/components/UserForm.tsx
+'use client';
+
+import { createUser } from '@/app/actions';
+import { Result } from 'better-result';
+
+export function UserForm() {
+  const handleSubmit = async (formData: FormData) => {
+    const serialized = await createUser(formData);
+    
+    // Deserialize on client side
+    const result = Result.deserialize<User, ValidationError>(serialized);
+    
+    if (Result.isError(result)) {
+      alert(`Error: ${result.error.message}`);
+      return;
+    }
+    
+    console.log('Created user:', result.value);
+  };
+  
+  return <form action={handleSubmit}>...</form>;
+}
+```
+
+### tRPC Procedures
+
+```typescript
+// server/routers/users.ts
+import { z } from 'zod';
+import { Result, SerializedResult } from 'better-result';
+import { publicProcedure, router } from '../trpc';
+
+class NotFoundError extends TaggedError('NotFoundError')<{
+  message: string;
+  id: string;
+}>() {}
+
+export const usersRouter = router({
+  getById: publicProcedure
+    .input(z.object({ id: z.string() }))
+    .query(async ({ input }): Promise<SerializedResult<User, NotFoundError>> => {
+      const result = await Result.tryPromise(
+        {
+          try: async () => {
+            const user = await db.users.findUnique({ 
+              where: { id: input.id } 
+            });
+            
+            if (!user) {
+              throw { notFound: true };
+            }
+            
+            return user;
+          },
+          catch: (e: any) => new NotFoundError({
+            message: `User ${input.id} not found`,
+            id: input.id
+          })
+        }
+      );
+      
+      return Result.serialize(result);
+    })
+});
+```
+
+```typescript
+// client/hooks/useUser.ts
+import { trpc } from '@/lib/trpc';
+import { Result } from 'better-result';
+
+export function useUser(id: string) {
+  const query = trpc.users.getById.useQuery({ id });
+  
+  if (!query.data) return { user: null, error: null, loading: true };
+  
+  const result = Result.deserialize<User, NotFoundError>(query.data);
+  
+  if (Result.isError(result)) {
+    return { user: null, error: result.error, loading: false };
+  }
+  
+  return { user: result.value, error: null, loading: false };
+}
+```
+
+### Redis Cache Storage
+
+```typescript
+import { Redis } from 'ioredis';
+import { Result, SerializedResult } from 'better-result';
+
+const redis = new Redis();
+
+class CacheError extends TaggedError('CacheError')<{
+  message: string;
+  operation: 'get' | 'set';
+}>() {}
+
+const cacheResult = async <T, E>(
+  key: string,
+  result: Result<T, E>,
+  ttlSeconds: number = 3600
+): Promise<Result<void, CacheError>> => {
+  return await Result.tryPromise(
+    {
+      try: async () => {
+        const serialized = Result.serialize(result);
+        const json = JSON.stringify(serialized);
+        await redis.setex(key, ttlSeconds, json);
+      },
+      catch: (e) => new CacheError({
+        message: String(e),
+        operation: 'set'
+      })
+    }
+  );
+};
+
+const getCachedResult = async <T, E>(
+  key: string
+): Promise<Result<Result<T, E> | null, CacheError>> => {
+  return await Result.tryPromise(
+    {
+      try: async () => {
+        const json = await redis.get(key);
+        
+        if (!json) {
+          return null;
+        }
+        
+        const parsed = JSON.parse(json);
+        const result = Result.deserialize<T, E>(parsed);
+        
+        // Handle deserialization error
+        if (Result.isError(result) && ResultDeserializationError.is(result.error)) {
+          // Invalid cached data - delete it
+          await redis.del(key);
+          return null;
+        }
+        
+        return result;
+      },
+      catch: (e) => new CacheError({
+        message: String(e),
+        operation: 'get'
+      })
+    }
+  );
+};
+
+// Usage
+const getUserWithCache = async (id: string) => {
+  const cacheKey = `user:${id}`;
+  
+  // Try cache first
+  const cached = await getCachedResult<User, NotFoundError>(cacheKey);
+  
+  if (Result.isOk(cached) && cached.value !== null) {
+    return cached.value; // Return cached Result<User, NotFoundError>
+  }
+  
+  // Cache miss - fetch from database
+  const result = await fetchUserFromDb(id);
+  
+  // Cache the result (both Ok and Err)
+  await cacheResult(cacheKey, result);
+  
+  return result;
+};
+```
+
+### Message Queue with BullMQ
+
+```typescript
+import { Queue, Worker } from 'bullmq';
+import { Result, SerializedResult } from 'better-result';
+
+interface ProcessUserJob {
+  userId: string;
+  result: SerializedResult<User, FetchError>;
+}
+
+const queue = new Queue<ProcessUserJob>('user-processing');
+
+// Producer: Add job with serialized Result
+const enqueueUserProcessing = async (userId: string) => {
+  const userResult = await fetchUser(userId);
+  
+  await queue.add('process', {
+    userId,
+    result: Result.serialize(userResult)
+  });
+};
+
+// Consumer: Deserialize and process
+const worker = new Worker<ProcessUserJob>('user-processing', async (job) => {
+  const { userId, result: serializedResult } = job.data;
+  
+  const result = Result.deserialize<User, FetchError>(serializedResult);
+  
+  if (Result.isError(result)) {
+    console.error(`Failed to process user ${userId}:`, result.error);
+    throw new Error(`User fetch failed: ${result.error.message}`);
+  }
+  
+  await processUser(result.value);
+});
+```
+
+## Testing Serialization
+
+```typescript
+import { describe, it, expect } from 'bun:test';
+import { Result } from 'better-result';
+
+describe('Serialization', () => {
+  it('roundtrips Ok through serialization', () => {
+    const original = Result.ok({ id: 42, name: 'test' });
+    const serialized = Result.serialize(original);
+    const deserialized = Result.deserialize<{ id: number; name: string }, never>(
+      serialized
+    );
+    
+    expect(deserialized.unwrap()).toEqual({ id: 42, name: 'test' });
+  });
+
+  it('roundtrips Err through serialization', () => {
+    const original = Result.err({ code: 'ERR', message: 'failed' });
+    const serialized = Result.serialize(original);
+    const deserialized = Result.deserialize<never, { code: string; message: string }>(
+      serialized
+    );
+    
+    expect(Result.isError(deserialized)).toBe(true);
+    if (Result.isError(deserialized)) {
+      expect(deserialized.error).toEqual({ code: 'ERR', message: 'failed' });
+    }
+  });
+
+  it('handles invalid deserialization input', () => {
+    const invalid = { foo: 'bar' };
+    const result = Result.deserialize(invalid);
+    
+    expect(Result.isError(result)).toBe(true);
+    if (Result.isError(result)) {
+      expect(ResultDeserializationError.is(result.error)).toBe(true);
+    }
+  });
+
+  it('roundtrips through JSON.stringify/parse', () => {
+    const original = Result.ok({ data: [1, 2, 3] });
+    const json = JSON.stringify(Result.serialize(original));
+    const parsed = JSON.parse(json);
+    const deserialized = Result.deserialize<{ data: number[] }, never>(parsed);
+    
+    expect(deserialized.unwrap()).toEqual({ data: [1, 2, 3] });
+  });
+});
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Always serialize before JSON encoding">
+    Never use `JSON.stringify` directly on Result instances. Always call `Result.serialize` first.
+  </Step>
+  <Step title="Handle deserialization errors">
+    Check for `ResultDeserializationError` when deserializing untrusted or external data.
+  </Step>
+  <Step title="Type serialized Results at boundaries">
+    Use `SerializedResult<T, E>` as return types for server actions, RPC procedures, and API routes.
+  </Step>
+  <Step title="Cache both success and failure">
+    Serialize and cache both `Ok` and `Err` Results to avoid redundant operations for known failures.
+  </Step>
+  <Step title="Validate deserialized values">
+    After deserialization, validate the inner value if it comes from external sources.
+  </Step>
+</Steps>
+
+<Info>
+  TaggedError instances serialize through their `toJSON()` method, preserving the `_tag`, `message`, `cause`, and other properties. This works seamlessly with `Result.serialize`.
+</Info>
+
+<Tip>
+  For long-term storage, consider versioning your serialized Result schemas to handle breaking changes gracefully.
+</Tip>
