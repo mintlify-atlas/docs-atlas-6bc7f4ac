@@ -1,0 +1,118 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "better-result",
+  "projectDescription": "Lightweight Result type for TypeScript with generator-based composition and functional error handling.",
+  "theme": "palm",
+  "primaryColor": "#CE422B",
+  "lightColor": "#F74C00",
+  "darkColor": "#A33023",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "core/creating-results",
+              "core/transforming-results",
+              "core/error-handling",
+              "core/pattern-matching",
+              "core/generator-composition"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/retry-logic",
+              "advanced/async-operations",
+              "advanced/serialization",
+              "advanced/best-practices"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/migration-v1-to-v2",
+              "guides/ai-agents"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Result",
+            "pages": [
+              "api/result",
+              "api/ok-and-err",
+              "api/instance-methods",
+              "api/static-methods"
+            ]
+          },
+          {
+            "group": "Error Types",
+            "pages": [
+              "api/tagged-error",
+              "api/panic",
+              "api/unhandled-exception"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/type-utilities",
+              "api/serialization-api"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Lightweight Result type with Ok/Err discriminated union",
+    "Generator-based composition with yield* syntax",
+    "TaggedError factory for exhaustive error matching",
+    "Built-in retry logic with exponential backoff",
+    "Serialization support for RPC and server actions",
+    "Panic type for unrecoverable errors",
+    "Dual API (data-first and data-last/pipeable)",
+    "Full TypeScript type safety with phantom types"
+  ],
+  "publicApiSurface": [
+    "Result.ok(value)",
+    "Result.err(error)",
+    "Result.try(fn)",
+    "Result.tryPromise(fn, config?)",
+    "Result.gen(generator)",
+    "Result.await(promise)",
+    "Result.map(result, fn)",
+    "Result.mapError(result, fn)",
+    "Result.andThen(result, fn)",
+    "Result.match(result, handlers)",
+    "Result.serialize(result)",
+    "Result.deserialize(value)",
+    "Result.partition(results)",
+    "Result.flatten(result)",
+    "TaggedError(tag)<Props>()",
+    "matchError(err, handlers)",
+    "matchErrorPartial(err, handlers, fallback)",
+    "Panic",
+    "UnhandledException",
+    "ResultDeserializationError",
+    "Ok<T, E>",
+    "Err<T, E>",
+    "InferOk<R>",
+    "InferErr<R>",
+    "SerializedResult<T, E>"
+  ]
+}
